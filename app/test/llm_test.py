@@ -4,31 +4,24 @@ from app.Services.Assistant import AssistantService
 assistant = AssistantService()
 
 
-result = assistant.process(
-    user_query="August ki meri salary batao",
-    employee_id=101
-)
+queries = [
+    "How can I apply for leave?",
+    "What should I do for an expense claim?",
+    "August ki meri salary batao"
+]
 
 
-print("\n========== ASSISTANT ==========")
+for query in queries:
 
-print("\nUser Query:")
-print(result["user_query"])
+    print("\n==============================")
+    print("QUERY:", query)
 
-print("\nIntent:")
-print(result["intent"])
+    result = assistant.process(
+        user_query=query,
+        employee_id=101
+    )
 
-print("\nConfidence:")
-print(result["confidence"])
-
-print("\nEntities:")
-print(result["entities"])
-
-print("\nTool Used:")
-print(result["tool_used"])
-
-print("\nTool Result:")
-print(result["tool_result"])
-
-print("\nFinal Response:")
-print(result["response"])
+    print("\nIntent:", result["intent"])
+    print("Confidence:", result["confidence"])
+    print("Tool:", result["tool_used"])
+    print("Response:", result["response"])
