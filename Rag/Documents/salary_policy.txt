@@ -1,0 +1,11 @@
+Salary Policy
+
+Salary information is available to employees through the employee application.
+
+Salary records may contain basic salary, allowances, deductions and net salary.
+
+Employees should use the employee application to view their salary information.
+
+For questions about salary processing or discrepancies, employees should contact the appropriate company team.
+
+Salary information is personal employee information and should only be accessible to the authorized employee.

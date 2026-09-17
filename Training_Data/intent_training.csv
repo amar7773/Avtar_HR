@@ -1,0 +1,28 @@
+query,intent
+How much experience do I have,experience
+What is my experience,experience
+Tell me about my experience,experience
+How long have I been working here,experience
+When did I join the company,experience
+What is my joining date,experience
+How many years have I worked here,experience
+Show my salary,salary
+What is my salary,salary
+Tell me my salary,salary
+What was my August salary,salary
+How much salary did I get,salary
+What is my net salary,salary
+Tell me my attendance,attendance
+What is my attendance,attendance
+Show my attendance,attendance
+How many days was I present,attendance
+How many days was I absent,attendance
+Did I come late this month,attendance
+Show my attendance record,attendance
+Which projects am I working on,projects
+What projects am I working on,projects
+Tell me my projects,projects
+Show my current projects,projects
+Which project am I currently working on,projects
+What are my ongoing projects,projects
+Tell me about my projects,projects

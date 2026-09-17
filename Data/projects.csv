@@ -1,0 +1,14 @@
+employee_id,project_name,technology,start_date,end_date,status
+101,Employee AI Assistant,"Python, FastAPI, NLP",2026-08-01,,In Progress
+101,House Price Prediction,"Python, Scikit-learn, FastAPI",2026-06-01,2026-07-15,Completed
+102,Payment API,"FastAPI, PostgreSQL",2026-01-10,,In Progress
+102,Authentication Service,"Python, JWT, PostgreSQL",2026-03-01,2026-06-20,Completed
+103,Company Dashboard,"React, JavaScript, Tailwind",2026-07-01,,In Progress
+104,Employee Attrition Model,"Python, ML, Pandas",2026-05-10,,In Progress
+104,Sales Prediction,"Python, Scikit-learn",2026-02-01,2026-04-30,Completed
+105,HR Analytics Dashboard,"Power BI, Excel",2026-06-15,,In Progress
+106,REST API Migration,"FastAPI, MongoDB",2026-04-01,,In Progress
+107,Employee Portal UI,"React, Tailwind",2026-08-05,,In Progress
+108,Customer Churn Prediction,"Python, ML, Pandas",2026-03-15,,In Progress
+109,Automated Testing Framework,"Python, Pytest",2026-05-01,2026-08-10,Completed
+110,HR Management System,"Python, FastAPI, PostgreSQL",2025-10-01,,In Progress
