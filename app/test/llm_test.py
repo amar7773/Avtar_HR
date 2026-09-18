@@ -1,27 +1,30 @@
 from app.Services.Assistant import AssistantService
+from Voice.Microphone import record_audio
 
 
 assistant = AssistantService()
 
+audio_file = record_audio(duration=5)
 
-queries = [
-    "How can I apply for leave?",
-    "What should I do for an expense claim?",
-    "August ki meri salary batao"
-]
+result = assistant.process_voice(
+    audio_file=audio_file,
+    employee_id=101
+)
 
+print("\n==============================")
+print("USER SAID:")
+print(result["user_query"])
 
-for query in queries:
+print("\nINTENT:")
+print(result["intent"])
 
-    print("\n==============================")
-    print("QUERY:", query)
+print("\nCONFIDENCE:")
+print(result["confidence"])
 
-    result = assistant.process(
-        user_query=query,
-        employee_id=101
-    )
+print("\nAI RESPONSE:")
+print(result["response"])
 
-    print("\nIntent:", result["intent"])
-    print("Confidence:", result["confidence"])
-    print("Tool:", result["tool_used"])
-    print("Response:", result["response"])
+print("\nERROR:")
+print(result.get("error"))
+
+print("==============================")

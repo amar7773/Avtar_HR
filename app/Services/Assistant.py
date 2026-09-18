@@ -1,12 +1,14 @@
 from app.Services.prediction import IntentPredictionService
 from app.Services.llm import LLMServices
 from Rag.rag_service import RAGSerivce
+from Voice.Stt import STTService
 
 class AssistantService:
     def __init__(self):
         self.prediction_service=(IntentPredictionService())
         self.llm_service=LLMServices()
         self.rag_service=RAGSerivce()
+        self.stt_service=STTService()
 
     def process(self, user_query, employee_id):
         prediction = self.prediction_service.predict(user_query)
@@ -59,3 +61,20 @@ Give a clear and natural response.
             "tool_result": result.get("tool_result"),
             "rag_context": context
         }
+    def process_voice(self, audio_file, employee_id):
+        try:
+            text = self.stt_service.transcribe(audio_file)
+            result = self.process(user_query=text,employee_id=employee_id)
+            result["audio_file"] = audio_file
+            return result
+        except Exception as e:
+            return {
+            "user_query": "",
+            "intent": None,
+            "confidence": 0,
+            "response": "Sorry, I could not understand your voice input.",
+            "tool_used": None,
+            "tool_result": None,
+            "rag_context": None,
+            "error": str(e)
+            }
