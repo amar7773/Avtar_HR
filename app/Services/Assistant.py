@@ -2,6 +2,7 @@ from app.Services.prediction import IntentPredictionService
 from app.Services.llm import LLMServices
 from Rag.rag_service import RAGSerivce
 from Voice.Stt import STTService
+from Voice.Tts import TTSService
 
 class AssistantService:
     def __init__(self):
@@ -9,6 +10,7 @@ class AssistantService:
         self.llm_service=LLMServices()
         self.rag_service=RAGSerivce()
         self.stt_service=STTService()
+        self.tts_service=TTSService()
 
     def process(self, user_query, employee_id):
         prediction = self.prediction_service.predict(user_query)
@@ -78,3 +80,18 @@ Give a clear and natural response.
             "rag_context": None,
             "error": str(e)
             }
+    def process_text_to_speech(self,user_query,employee_id):
+        result=self.process(user_query=user_query,employee_id=employee_id)
+        audio_file=self.tts_service.generate_speech(text=result["response"],
+            output_file="Voice/ai_response.mp3")
+        result["audio_file"] = audio_file
+        return result
+    def process_speech_to_speech(self,audio_file,employee_id):
+        user_text=self.stt_service.transcribe(audio_file)
+        result=self.process(user_query=user_text,employee_id=employee_id)
+        response_audio = self.tts_service.generate_speech(
+        text=result["response"],
+        output_file="Voice/ai_response.mp3")
+        result["input_audio"] = audio_file
+        result["response_audio"] = response_audio
+        return result
