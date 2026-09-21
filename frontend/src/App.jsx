@@ -4,26 +4,24 @@ import "./App.css";
 const API_URL = "http://127.0.0.1:8000";
 
 function App() {
-  // =========================
-  // LOGIN
-  // =========================
-
-  const [loggedIn, setLoggedIn] = useState(() => {
-    return Boolean(localStorage.getItem("employee_id"));
-  });
+  const [loggedIn, setLoggedIn] = useState(
+    Boolean(localStorage.getItem("employee_id")),
+  );
 
   const [employee, setEmployee] = useState(() => {
-    const saved = localStorage.getItem("employee");
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem("employee");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
   });
 
   const [loginId, setLoginId] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
 
-  // =========================
-  // CHAT
-  // =========================
+  const [activePage, setActivePage] = useState("assistant");
 
   const [message, setMessage] = useState("");
 
@@ -32,9 +30,8 @@ function App() {
 
     if (!id) return [];
 
-    const saved = localStorage.getItem(`chat_${id}`);
-
     try {
+      const saved = localStorage.getItem(`chat_${id}`);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -42,22 +39,39 @@ function App() {
   });
 
   const [loading, setLoading] = useState(false);
-
-  // =========================
-  // VOICE
-  // =========================
-
   const [recording, setRecording] = useState(false);
-  const [mediaRecorder, setMediaRecorder] = useState(null);
-
-  const [audioUrl, setAudioUrl] = useState(null);
   const [voiceLoading, setVoiceLoading] = useState(false);
+
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [audioUrl, setAudioUrl] = useState(null);
+
+  const [serverOnline, setServerOnline] = useState(false);
 
   const messagesEndRef = useRef(null);
 
-  // =========================
-  // SAVE CHAT
-  // =========================
+  /* =====================================================
+     SERVER HEALTH
+  ===================================================== */
+
+  useEffect(() => {
+    checkServer();
+  }, []);
+
+  const checkServer = async () => {
+    try {
+      const response = await fetch(`${API_URL}/`, {
+        method: "GET",
+      });
+
+      setServerOnline(response.ok);
+    } catch {
+      setServerOnline(false);
+    }
+  };
+
+  /* =====================================================
+     SAVE CHAT
+  ===================================================== */
 
   useEffect(() => {
     const id = localStorage.getItem("employee_id");
@@ -67,9 +81,9 @@ function App() {
     localStorage.setItem(`chat_${id}`, JSON.stringify(messages));
   }, [messages]);
 
-  // =========================
-  // AUTO SCROLL
-  // =========================
+  /* =====================================================
+     AUTO SCROLL
+  ===================================================== */
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -77,20 +91,20 @@ function App() {
     });
   }, [messages, loading]);
 
-  // =========================
-  // LOGIN
-  // =========================
+  /* =====================================================
+     LOGIN
+  ===================================================== */
 
   const handleLogin = async () => {
     if (!loginId.trim()) {
-      setLoginError("Please enter your Employee ID.");
+      setLoginError("Enter your Employee ID.");
       return;
     }
 
     const id = Number(loginId);
 
     if (!Number.isInteger(id) || id <= 0) {
-      setLoginError("Please enter a valid Employee ID.");
+      setLoginError("Enter a valid Employee ID.");
       return;
     }
 
@@ -111,7 +125,7 @@ function App() {
       const data = await response.json();
 
       if (!response.ok || !data.success) {
-        setLoginError(data.message || "Employee ID not found.");
+        setLoginError(data.message || "Employee not found.");
         return;
       }
 
@@ -122,26 +136,27 @@ function App() {
       setEmployee(data.employee);
       setLoggedIn(true);
 
-      const savedChat = localStorage.getItem(
-        `chat_${data.employee.employee_id}`,
-      );
+      const saved = localStorage.getItem(`chat_${data.employee.employee_id}`);
 
       try {
-        setMessages(savedChat ? JSON.parse(savedChat) : []);
+        setMessages(saved ? JSON.parse(saved) : []);
       } catch {
         setMessages([]);
       }
+
+      setServerOnline(true);
     } catch (error) {
       console.error(error);
-      setLoginError("Unable to connect to server. Please start FastAPI.");
+
+      setLoginError("Unable to connect with FastAPI. Start the backend first.");
     } finally {
       setLoginLoading(false);
     }
   };
 
-  // =========================
-  // LOGOUT
-  // =========================
+  /* =====================================================
+     LOGOUT
+  ===================================================== */
 
   const logout = () => {
     localStorage.removeItem("employee_id");
@@ -152,60 +167,29 @@ function App() {
     setMessages([]);
     setMessage("");
     setAudioUrl(null);
+    setActivePage("assistant");
   };
 
-  // =========================
-  // QUICK ACTIONS
-  // =========================
-
-  const quickActions = [
-    {
-      icon: "₹",
-      title: "Salary",
-      text: "Show my salary details",
-      description: "View your salary information",
-    },
-    {
-      icon: "◷",
-      title: "Attendance",
-      text: "Show my attendance",
-      description: "Check your attendance",
-    },
-    {
-      icon: "◆",
-      title: "Projects",
-      text: "Show my projects",
-      description: "View project information",
-    },
-    {
-      icon: "◎",
-      title: "Experience",
-      text: "Show my experience",
-      description: "View your work experience",
-    },
-  ];
-
-  // =========================
-  // CHAT API
-  // =========================
+  /* =====================================================
+     CHAT
+  ===================================================== */
 
   const sendMessage = async (text = message) => {
     if (!text.trim() || loading || !employee) return;
 
-    const userMessage = text.trim();
+    const userText = text.trim();
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "user",
-        content: userMessage,
-        time: new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      },
-    ]);
+    const userMsg = {
+      id: Date.now(),
+      role: "user",
+      content: userText,
+      time: new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    };
 
+    setMessages((prev) => [...prev, userMsg]);
     setMessage("");
     setLoading(true);
 
@@ -216,51 +200,55 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          user_query: userMessage,
+          user_query: userText,
           employee_id: Number(employee.employee_id),
         }),
       });
 
-      if (!response.ok) {
-        throw new Error("Chat API failed");
-      }
-
       const data = await response.json();
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.response || "I could not generate a response.",
-          time: new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-        },
-      ]);
+      if (!response.ok) {
+        throw new Error(data.detail || "Chat API failed");
+      }
+
+      const assistantMsg = {
+        id: Date.now() + 1,
+        role: "assistant",
+        content:
+          data.response || data.answer || "I couldn't generate a response.",
+        time: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
     } catch (error) {
       console.error(error);
 
       setMessages((prev) => [
         ...prev,
         {
+          id: Date.now() + 2,
           role: "assistant",
           content:
-            "I couldn't connect to the AI server. Please make sure FastAPI is running.",
+            "I couldn't connect to the AI server. Please check that FastAPI is running.",
           error: true,
         },
       ]);
+
+      setServerOnline(false);
     } finally {
       setLoading(false);
     }
   };
 
-  // =========================
-  // STT
-  // =========================
+  /* =====================================================
+     STT
+  ===================================================== */
 
-  const startRecording = async () => {
-    if (recording || voiceLoading) return;
+  const startSTT = async () => {
+    if (recording || loading || voiceLoading) return;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -268,24 +256,22 @@ function App() {
       });
 
       const recorder = new MediaRecorder(stream);
-      const audioChunks = [];
+      const chunks = [];
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          audioChunks.push(event.data);
+          chunks.push(event.data);
         }
       };
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunks, {
+        stream.getTracks().forEach((track) => track.stop());
+
+        const blob = new Blob(chunks, {
           type: "audio/webm",
         });
 
-        stream.getTracks().forEach((track) => {
-          track.stop();
-        });
-
-        await sendAudioToSTT(audioBlob);
+        await sendAudioToSTT(blob);
       };
 
       recorder.start();
@@ -294,8 +280,7 @@ function App() {
       setRecording(true);
     } catch (error) {
       console.error(error);
-
-      alert("Microphone permission required. Please allow microphone access.");
+      alert("Please allow microphone permission.");
     }
   };
 
@@ -314,39 +299,32 @@ function App() {
     try {
       const formData = new FormData();
 
-      formData.append("audio", audioBlob, "user_voice.webm");
+      formData.append("audio", audioBlob, "employee_voice.webm");
 
       const response = await fetch(`${API_URL}/stt`, {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error("STT API failed");
-      }
-
       const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error("STT failed");
+      }
 
       setMessage(data.text || "");
     } catch (error) {
       console.error(error);
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Speech recognition failed. Please try again.",
-          error: true,
-        },
-      ]);
+      alert("Speech recognition failed.");
     } finally {
       setLoading(false);
     }
   };
 
-  // =========================
-  // TTS
-  // =========================
+  /* =====================================================
+     TTS
+  ===================================================== */
 
   const generateSpeech = async (text) => {
     if (!text?.trim() || voiceLoading) return;
@@ -365,7 +343,7 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error("TTS API failed");
+        throw new Error("TTS failed");
       }
 
       const blob = await response.blob();
@@ -376,21 +354,27 @@ function App() {
 
       const audio = new Audio(url);
 
+      /*
+        Slow playback slightly.
+        Backend voice itself should also be configured
+        with a suitable speaking speed.
+      */
+      audio.playbackRate = 0.9;
+
       await audio.play();
     } catch (error) {
       console.error(error);
-
-      alert("Text-to-Speech failed. Please check ElevenLabs/API.");
+      alert("Text-to-Speech failed.");
     } finally {
       setVoiceLoading(false);
     }
   };
 
-  // =========================
-  // FULL VOICE AI
-  // =========================
+  /* =====================================================
+     FULL VOICE AI
+  ===================================================== */
 
-  const startFullVoice = async () => {
+  const startVoiceAI = async () => {
     if (recording || voiceLoading) return;
 
     try {
@@ -399,24 +383,22 @@ function App() {
       });
 
       const recorder = new MediaRecorder(stream);
-      const audioChunks = [];
+      const chunks = [];
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          audioChunks.push(event.data);
+          chunks.push(event.data);
         }
       };
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunks, {
+        stream.getTracks().forEach((track) => track.stop());
+
+        const blob = new Blob(chunks, {
           type: "audio/webm",
         });
 
-        stream.getTracks().forEach((track) => {
-          track.stop();
-        });
-
-        await sendVoiceToAI(audioBlob);
+        await sendVoiceToAI(blob);
       };
 
       recorder.start();
@@ -425,7 +407,6 @@ function App() {
       setRecording(true);
     } catch (error) {
       console.error(error);
-
       alert("Microphone permission required.");
     }
   };
@@ -436,9 +417,9 @@ function App() {
     try {
       const formData = new FormData();
 
-      formData.append("audio", audioBlob, "user_voice.webm");
+      formData.append("audio", audioBlob, "employee_voice.webm");
 
-      formData.append("employee_id", Number(employee.employee_id));
+      formData.append("employee_id", String(employee.employee_id));
 
       const response = await fetch(`${API_URL}/voice`, {
         method: "POST",
@@ -457,13 +438,16 @@ function App() {
 
       const audio = new Audio(url);
 
+      audio.playbackRate = 0.9;
+
       await audio.play();
 
       setMessages((prev) => [
         ...prev,
         {
+          id: Date.now(),
           role: "assistant",
-          content: "Voice response generated successfully.",
+          content: "Voice response generated.",
           time: new Date().toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
@@ -476,10 +460,11 @@ function App() {
       setMessages((prev) => [
         ...prev,
         {
+          id: Date.now(),
           role: "assistant",
-          content:
-            "Voice assistant failed. Please check FastAPI and AI services.",
           error: true,
+          content:
+            "Voice AI failed. Please check FastAPI and your AI voice services.",
         },
       ]);
     } finally {
@@ -489,493 +474,734 @@ function App() {
     }
   };
 
-  // =========================
-  // CLEAR CHAT
-  // =========================
+  /* =====================================================
+     CLEAR CHAT
+  ===================================================== */
 
   const clearChat = () => {
     if (!employee) return;
 
-    const confirmClear = window.confirm("Clear this employee's chat history?");
-
-    if (!confirmClear) return;
+    if (!window.confirm("Clear your complete chat history?")) {
+      return;
+    }
 
     localStorage.removeItem(`chat_${employee.employee_id}`);
 
     setMessages([]);
     setMessage("");
-    setAudioUrl(null);
   };
 
-  // =========================
-  // KEYBOARD
-  // =========================
+  /* =====================================================
+     COPY
+  ===================================================== */
 
-  const handleKeyDown = (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-
-      sendMessage();
+  const copyMessage = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      console.error(error);
     }
   };
 
-  // =========================
-  // LOGIN SCREEN
-  // =========================
+  /* =====================================================
+     QUICK QUESTIONS
+  ===================================================== */
+
+  const quickQuestions = [
+    {
+      icon: "₹",
+      title: "Salary",
+      description: "Check your salary",
+      query: "Show my salary details",
+    },
+    {
+      icon: "◷",
+      title: "Attendance",
+      description: "View attendance",
+      query: "Show my attendance",
+    },
+    {
+      icon: "◆",
+      title: "Projects",
+      description: "View your projects",
+      query: "Show my projects",
+    },
+    {
+      icon: "◎",
+      title: "Experience",
+      description: "View work experience",
+      query: "Show my experience",
+    },
+  ];
+
+  /* =====================================================
+     LOGIN SCREEN
+  ===================================================== */
 
   if (!loggedIn) {
     return (
       <div className="login-page">
-        <div className="login-background-orb orb-one"></div>
-        <div className="login-background-orb orb-two"></div>
+        <div className="login-glow glow-one"></div>
+        <div className="login-glow glow-two"></div>
 
-        <div className="login-container">
+        <div className="login-box">
           <div className="login-brand">
-            <div className="brand-logo">✦</div>
+            <div className="logo-orb">✦</div>
 
             <div>
               <h1>Employee AI</h1>
-              <p>Intelligent workplace assistant</p>
+              <p>Intelligent Workplace Assistant</p>
             </div>
           </div>
 
           <div className="login-card">
-            <div className="login-icon">
+            <div className="login-ai">
               <span>AI</span>
             </div>
 
-            <div className="login-heading">
-              <h2>Welcome back</h2>
+            <h2>Welcome back</h2>
 
-              <p>Enter your Employee ID to continue</p>
+            <p className="login-subtitle">Sign in with your employee ID</p>
+
+            <label>Employee ID</label>
+
+            <div className="login-input">
+              <span>#</span>
+
+              <input
+                type="number"
+                value={loginId}
+                onChange={(e) => {
+                  setLoginId(e.target.value);
+                  setLoginError("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleLogin();
+                  }
+                }}
+                placeholder="e.g. 1010"
+              />
             </div>
 
-            <div className="login-field">
-              <label>Employee ID</label>
-
-              <div className="login-input-wrapper">
-                <span className="input-symbol">#</span>
-
-                <input
-                  type="number"
-                  value={loginId}
-                  onChange={(event) => {
-                    setLoginId(event.target.value);
-                    setLoginError("");
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      handleLogin();
-                    }
-                  }}
-                  placeholder="Enter your employee ID"
-                  autoFocus
-                />
-              </div>
-            </div>
-
-            {loginError && (
-              <div className="login-error">
-                <span>!</span>
-                {loginError}
-              </div>
-            )}
+            {loginError && <div className="login-error">⚠ {loginError}</div>}
 
             <button
-              className="login-button"
+              className="login-submit"
               onClick={handleLogin}
               disabled={loginLoading}
             >
-              {loginLoading ? (
-                <>
-                  <span className="button-spinner"></span>
-                  Signing in...
-                </>
-              ) : (
-                <>
-                  Sign in
-                  <span>→</span>
-                </>
-              )}
+              {loginLoading ? "Connecting..." : "Enter Employee AI →"}
             </button>
 
-            <div className="login-security">
-              <span>●</span>
-              Secure employee access
+            <div className="login-status">
+              <span className={serverOnline ? "online" : "offline"}></span>
+
+              {serverOnline ? "AI server connected" : "Waiting for AI server"}
             </div>
           </div>
 
-          <p className="login-footer">
-            AI Employee Assistant • NLP • LLM • RAG • Voice AI
-          </p>
+          <p className="login-footer">NLP • LLM • RAG • Voice AI</p>
         </div>
       </div>
     );
   }
 
-  // =========================
-  // MAIN APPLICATION
-  // =========================
-
   const employeeName = employee?.name || "Employee";
 
-  const employeeInitial = employeeName.charAt(0).toUpperCase();
+  const initial = employeeName.charAt(0).toUpperCase();
 
-  return (
-    <div className="app">
-      {/* ================= SIDEBAR ================= */}
+  /* =====================================================
+     DASHBOARD
+  ===================================================== */
 
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">✦</div>
+  const Dashboard = () => (
+    <div className="dashboard">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">EMPLOYEE OVERVIEW</span>
 
-          <div>
-            <h2>Employee AI</h2>
-            <span>Assistant</span>
+          <h2>Welcome, {employeeName}</h2>
+
+          <p>Your personal AI workplace command center.</p>
+        </div>
+
+        <div className="server-pill">
+          <span className={serverOnline ? "online" : "offline"}></span>
+
+          {serverOnline ? "Systems operational" : "Server offline"}
+        </div>
+      </div>
+
+      <div className="profile-hero">
+        <div className="big-avatar">{initial}</div>
+
+        <div className="profile-main">
+          <h3>{employeeName}</h3>
+
+          <p>
+            {employee.designation || "Employee"} •{" "}
+            {employee.department || "Organization"}
+          </p>
+
+          <span>Employee ID #{employee.employee_id}</span>
+        </div>
+
+        <div className="profile-chip">
+          <span></span>
+          Active Employee
+        </div>
+      </div>
+
+      <div className="stat-grid">
+        <div className="stat-card purple">
+          <div className="stat-icon">₹</div>
+
+          <span>Salary</span>
+
+          <strong>Ask AI</strong>
+
+          <small>Get latest salary details</small>
+        </div>
+
+        <div className="stat-card blue">
+          <div className="stat-icon">◷</div>
+
+          <span>Attendance</span>
+
+          <strong>Ask AI</strong>
+
+          <small>Check attendance records</small>
+        </div>
+
+        <div className="stat-card green">
+          <div className="stat-icon">◆</div>
+
+          <span>Projects</span>
+
+          <strong>Ask AI</strong>
+
+          <small>Explore assigned projects</small>
+        </div>
+
+        <div className="stat-card orange">
+          <div className="stat-icon">◎</div>
+
+          <span>Experience</span>
+
+          <strong>Ask AI</strong>
+
+          <small>View your experience</small>
+        </div>
+      </div>
+
+      <div className="dashboard-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <span>AI TOOLS</span>
+              <h3>Ask your assistant</h3>
+            </div>
+
+            <span className="panel-icon">✦</span>
+          </div>
+
+          <div className="tool-list">
+            {quickQuestions.map((item) => (
+              <button
+                key={item.title}
+                onClick={() => {
+                  setActivePage("assistant");
+                  setTimeout(() => {
+                    sendMessage(item.query);
+                  }, 50);
+                }}
+                className="tool-item"
+              >
+                <div>{item.icon}</div>
+
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{item.description}</small>
+                </span>
+
+                <b>→</b>
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="sidebar-divider"></div>
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <span>CAPABILITIES</span>
+              <h3>AI Services</h3>
+            </div>
 
-        <div className="menu-title">WORKSPACE</div>
+            <span className="panel-icon">⚡</span>
+          </div>
 
-        <button className="side-menu active">
+          <div className="capability-list">
+            <div>
+              <span className="cap-dot green"></span>
+              <strong>NLP</strong>
+              <small>Intent understanding</small>
+            </div>
+
+            <div>
+              <span className="cap-dot purple"></span>
+              <strong>LLM</strong>
+              <small>Natural responses</small>
+            </div>
+
+            <div>
+              <span className="cap-dot blue"></span>
+              <strong>RAG</strong>
+              <small>Knowledge retrieval</small>
+            </div>
+
+            <div>
+              <span className="cap-dot orange"></span>
+              <strong>Voice AI</strong>
+              <small>Speech interaction</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  /* =====================================================
+     PROFILE
+  ===================================================== */
+
+  const Profile = () => (
+    <div className="dashboard">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">MY PROFILE</span>
+
+          <h2>Employee Profile</h2>
+
+          <p>Your employee information.</p>
+        </div>
+      </div>
+
+      <div className="profile-detail">
+        <div className="profile-detail-avatar">{initial}</div>
+
+        <div className="profile-fields">
+          <div>
+            <span>Name</span>
+            <strong>{employee.name || "—"}</strong>
+          </div>
+
+          <div>
+            <span>Employee ID</span>
+            <strong>#{employee.employee_id}</strong>
+          </div>
+
+          <div>
+            <span>Department</span>
+            <strong>{employee.department || "—"}</strong>
+          </div>
+
+          <div>
+            <span>Designation</span>
+            <strong>{employee.designation || "—"}</strong>
+          </div>
+
+          <div>
+            <span>Joining Date</span>
+            <strong>{employee.joining_date || "—"}</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  /* =====================================================
+     SETTINGS
+  ===================================================== */
+
+  const Settings = () => (
+    <div className="dashboard">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">SETTINGS</span>
+
+          <h2>Assistant Settings</h2>
+
+          <p>Manage your local assistant experience.</p>
+        </div>
+      </div>
+
+      <div className="settings-panel">
+        <div className="setting-row">
+          <div>
+            <strong>Chat History</strong>
+            <span>Conversations are saved locally for this employee.</span>
+          </div>
+
+          <button onClick={clearChat} className="danger-button">
+            Clear history
+          </button>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <strong>AI Server</strong>
+            <span>FastAPI backend connection status.</span>
+          </div>
+
+          <span className="setting-status">
+            <i className={serverOnline ? "online" : "offline"}></i>
+
+            {serverOnline ? "Connected" : "Disconnected"}
+          </span>
+        </div>
+
+        <div className="setting-row">
+          <div>
+            <strong>Voice AI</strong>
+            <span>Speech-to-text, text-to-speech and voice-to-voice.</span>
+          </div>
+
+          <span className="setting-status active">Enabled</span>
+        </div>
+      </div>
+    </div>
+  );
+
+  /* =====================================================
+     MAIN UI
+  ===================================================== */
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-logo">✦</div>
+
+          <div>
+            <strong>Employee AI</strong>
+            <span>Workplace Assistant</span>
+          </div>
+        </div>
+
+        <div className="workspace-label">WORKSPACE</div>
+
+        <button
+          className={activePage === "assistant" ? "nav active" : "nav"}
+          onClick={() => setActivePage("assistant")}
+        >
           <span>✦</span>
           AI Assistant
         </button>
 
-        <button className="side-menu">
-          <span>◫</span>
+        <button
+          className={activePage === "dashboard" ? "nav active" : "nav"}
+          onClick={() => setActivePage("dashboard")}
+        >
+          <span>▦</span>
           Dashboard
         </button>
 
-        <button className="side-menu">
+        <button
+          className={activePage === "profile" ? "nav active" : "nav"}
+          onClick={() => setActivePage("profile")}
+        >
           <span>◎</span>
           My Profile
         </button>
 
-        <button className="side-menu">
+        <button
+          className={activePage === "settings" ? "nav active" : "nav"}
+          onClick={() => setActivePage("settings")}
+        >
           <span>⚙</span>
           Settings
         </button>
 
-        <div className="sidebar-info">
-          <div className="sidebar-info-icon">✨</div>
+        <div className="sidebar-ai-card">
+          <div>✦</div>
 
-          <div>
-            <strong>AI Assistant</strong>
+          <strong>AI Assistant</strong>
 
-            <span>Ask about your work</span>
-          </div>
+          <span>Ask about salary, attendance & more.</span>
         </div>
 
         <div className="sidebar-bottom">
-          <div className="employee-card">
-            <div className="employee-avatar">{employeeInitial}</div>
+          <div className="employee-mini">
+            <div className="mini-avatar">{initial}</div>
 
-            <div className="employee-info">
+            <div>
               <strong>{employeeName}</strong>
 
-              <span>ID: {employee.employee_id}</span>
+              <span>ID #{employee.employee_id}</span>
             </div>
 
-            <div className="online-dot"></div>
+            <i></i>
           </div>
 
-          <button className="logout-button" onClick={logout}>
-            <span>↪</span>
-            Logout
+          <button className="logout" onClick={logout}>
+            ↪ Logout
           </button>
         </div>
       </aside>
 
-      {/* ================= MAIN ================= */}
-
       <main className="main">
-        {/* TOPBAR */}
-
         <header className="topbar">
-          <div className="topbar-left">
-            <div className="mobile-logo">✦</div>
+          <div className="mobile-brand">✦</div>
 
-            <div>
-              <h1>AI Employee Assistant</h1>
+          <div>
+            <h1>
+              {activePage === "assistant"
+                ? "AI Assistant"
+                : activePage === "dashboard"
+                  ? "Dashboard"
+                  : activePage === "profile"
+                    ? "My Profile"
+                    : "Settings"}
+            </h1>
 
-              <div className="status">
-                <span className="status-dot"></span>
-                AI system online
-              </div>
+            <div className="connection">
+              <span className={serverOnline ? "online" : "offline"}></span>
+
+              {serverOnline ? "AI system online" : "AI server offline"}
             </div>
           </div>
 
-          <div className="topbar-right">
-            <div className="employee-top-info">
-              <div className="top-avatar">{employeeInitial}</div>
+          <div className="top-user">
+            <div className="top-avatar">{initial}</div>
 
-              <div className="top-employee-name">
-                <strong>{employeeName}</strong>
-
-                <span>{employee.department || "Employee"}</span>
-              </div>
+            <div>
+              <strong>{employeeName}</strong>
+              <span>#{employee.employee_id}</span>
             </div>
-
-            <button className="clear-button" onClick={clearChat}>
-              <span>⌫</span>
-              Clear chat
-            </button>
           </div>
         </header>
 
-        {/* CHAT AREA */}
+        {activePage === "dashboard" && <Dashboard />}
 
-        <section className="chat-area">
-          {messages.length === 0 ? (
-            <div className="welcome">
-              <div className="welcome-glow"></div>
+        {activePage === "profile" && <Profile />}
 
-              <div className="ai-orb">
-                <div className="orb-ring"></div>
+        {activePage === "settings" && <Settings />}
 
-                <div className="orb-inner">✦</div>
-              </div>
-
-              <div className="welcome-badge">
-                <span></span>
-                AI Assistant Ready
-              </div>
-
-              <h2>
-                How can I help you,
-                <br />
-                <span>{employeeName}?</span>
-              </h2>
-
-              <p>
-                Ask me about your salary, attendance, projects, experience or
-                company policies.
-              </p>
-
-              <div className="quick-actions">
-                {quickActions.map((action, index) => (
-                  <button
-                    key={index}
-                    className="quick-card"
-                    onClick={() => sendMessage(action.text)}
-                  >
-                    <div className="quick-icon">{action.icon}</div>
-
-                    <div className="quick-content">
-                      <strong>{action.title}</strong>
-
-                      <span>{action.description}</span>
-                    </div>
-
-                    <span className="arrow">→</span>
-                  </button>
-                ))}
-              </div>
-
-              <div className="feature-row">
-                <span>
-                  <b>●</b> NLP
-                </span>
-
-                <span>
-                  <b>●</b> LLM
-                </span>
-
-                <span>
-                  <b>●</b> RAG
-                </span>
-
-                <span>
-                  <b>●</b> Voice AI
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="messages">
-              <div className="conversation-label">
-                <span></span>
-                Conversation
-              </div>
-
-              {messages.map((item, index) => (
-                <div
-                  key={index}
-                  className={`message-row ${
-                    item.role === "user" ? "user-row" : "assistant-row"
-                  }`}
-                >
-                  {item.role === "assistant" && (
-                    <div className="message-avatar">✦</div>
-                  )}
-
-                  <div className="message-content">
-                    <div
-                      className={`message-name ${
-                        item.role === "user" ? "user-name" : ""
-                      }`}
-                    >
-                      {item.role === "user" ? employeeName : "AI Assistant"}
-                    </div>
-
-                    <div
-                      className={`message-bubble ${
-                        item.role === "user"
-                          ? "user-bubble"
-                          : "assistant-bubble"
-                      } ${item.error ? "error-bubble" : ""}`}
-                    >
-                      {item.content}
-                    </div>
-
-                    {item.role === "assistant" && (
-                      <div className="message-tools">
-                        <button
-                          onClick={() => generateSpeech(item.content)}
-                          disabled={voiceLoading}
-                          title="Listen"
-                        >
-                          {voiceLoading ? "..." : "🔊"}
-                        </button>
-
-                        {item.time && <span>{item.time}</span>}
-                      </div>
-                    )}
-
-                    {item.role === "user" && item.time && (
-                      <div className="user-time">{item.time}</div>
-                    )}
+        {activePage === "assistant" && (
+          <>
+            <section className="chat-area">
+              {messages.length === 0 ? (
+                <div className="assistant-home">
+                  <div className="hero-orb">
+                    <div>✦</div>
                   </div>
 
-                  {item.role === "user" && (
-                    <div className="user-message-avatar">{employeeInitial}</div>
-                  )}
+                  <div className="ready">
+                    <span></span>
+                    AI ASSISTANT READY
+                  </div>
+
+                  <h2>
+                    What can I help you
+                    <br />
+                    <em>{employeeName}?</em>
+                  </h2>
+
+                  <p>
+                    Ask questions about your employee information or use your
+                    voice.
+                  </p>
+
+                  <div className="quick-grid">
+                    {quickQuestions.map((item) => (
+                      <button
+                        key={item.title}
+                        onClick={() => sendMessage(item.query)}
+                      >
+                        <div className="quick-symbol">{item.icon}</div>
+
+                        <div>
+                          <strong>{item.title}</strong>
+
+                          <span>{item.description}</span>
+                        </div>
+
+                        <b>→</b>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="ai-stack">
+                    <span>NLP</span>
+                    <span>LLM</span>
+                    <span>RAG</span>
+                    <span>STT</span>
+                    <span>TTS</span>
+                    <span>VOICE AI</span>
+                  </div>
                 </div>
-              ))}
+              ) : (
+                <div className="messages">
+                  <div className="conversation-title">
+                    <span></span>
+                    Your conversation
+                  </div>
 
-              {loading && (
-                <div className="message-row assistant-row">
-                  <div className="message-avatar">✦</div>
+                  {messages.map((item) => (
+                    <div
+                      key={item.id}
+                      className={
+                        item.role === "user"
+                          ? "message user-message"
+                          : "message ai-message"
+                      }
+                    >
+                      {item.role === "assistant" && (
+                        <div className="message-avatar">✦</div>
+                      )}
 
-                  <div className="message-content">
-                    <div className="message-name">AI Assistant</div>
+                      <div className="message-body">
+                        <small>
+                          {item.role === "user" ? employeeName : "Employee AI"}
+                        </small>
 
-                    <div className="message-bubble assistant-bubble">
-                      <div className="typing">
-                        <span></span>
-                        <span></span>
-                        <span></span>
+                        <div className={item.error ? "bubble error" : "bubble"}>
+                          {item.content}
+                        </div>
 
-                        <small>Thinking...</small>
+                        <div className="message-actions">
+                          {item.role === "assistant" && (
+                            <>
+                              <button
+                                onClick={() => generateSpeech(item.content)}
+                              >
+                                🔊 Listen
+                              </button>
+
+                              <button onClick={() => copyMessage(item.content)}>
+                                ⧉ Copy
+                              </button>
+                            </>
+                          )}
+
+                          <span>{item.time}</span>
+                        </div>
+                      </div>
+
+                      {item.role === "user" && (
+                        <div className="user-avatar">{initial}</div>
+                      )}
+                    </div>
+                  ))}
+
+                  {loading && (
+                    <div className="message ai-message">
+                      <div className="message-avatar">✦</div>
+
+                      <div className="message-body">
+                        <small>Employee AI</small>
+
+                        <div className="bubble">
+                          <div className="thinking">
+                            <i></i>
+                            <i></i>
+                            <i></i>
+                            <span>Thinking...</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
+
+                  <div ref={messagesEndRef}></div>
                 </div>
               )}
+            </section>
 
-              <div ref={messagesEndRef}></div>
-            </div>
-          )}
-        </section>
+            {audioUrl && (
+              <div className="audio-bar">
+                <span>🔊</span>
 
-        {/* AUDIO PLAYER */}
+                <div>
+                  <strong>AI Voice</strong>
 
-        {audioUrl && (
-          <div className="audio-panel">
-            <div className="audio-icon">🔊</div>
+                  <small>Audio response ready</small>
+                </div>
 
-            <div className="audio-info">
-              <strong>AI Voice Response</strong>
+                <audio controls src={audioUrl} />
 
-              <span>Audio generated successfully</span>
-            </div>
+                <button onClick={() => setAudioUrl(null)}>×</button>
+              </div>
+            )}
 
-            <audio controls src={audioUrl} />
+            <section className="composer">
+              <div
+                className={
+                  recording ? "composer-box recording" : "composer-box"
+                }
+              >
+                <textarea
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      sendMessage();
+                    }
+                  }}
+                  placeholder={
+                    recording
+                      ? "Listening to you..."
+                      : "Ask anything about your employee data..."
+                  }
+                  disabled={recording}
+                />
 
-            <button className="close-audio" onClick={() => setAudioUrl(null)}>
-              ×
-            </button>
-          </div>
+                <div className="composer-actions">
+                  <button
+                    className={recording ? "mic active" : "mic"}
+                    onClick={recording ? stopRecording : startSTT}
+                    title="Speech to Text"
+                  >
+                    {recording ? "■" : "🎙"}
+                  </button>
+
+                  <button
+                    className={
+                      voiceLoading ? "voice-button active" : "voice-button"
+                    }
+                    onClick={recording ? stopRecording : startVoiceAI}
+                    disabled={voiceLoading}
+                    title="Voice to Voice"
+                  >
+                    {voiceLoading ? "..." : "✦"}
+                  </button>
+
+                  <button
+                    className="send"
+                    onClick={() => sendMessage()}
+                    disabled={!message.trim() || loading || recording}
+                  >
+                    ↑
+                  </button>
+                </div>
+              </div>
+
+              <div className="composer-hint">
+                <span>
+                  <b>Enter</b> send
+                </span>
+
+                <span>🎙 Speech to Text</span>
+
+                <span>✦ Voice to Voice</span>
+
+                <span>🔊 Text to Speech</span>
+              </div>
+            </section>
+          </>
         )}
-
-        {/* INPUT */}
-
-        <section className="input-section">
-          <div
-            className={`input-wrapper ${recording ? "input-recording" : ""}`}
-          >
-            <textarea
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                recording ? "Listening..." : "Ask your AI assistant anything..."
-              }
-              rows="1"
-              disabled={recording}
-            />
-
-            <div className="input-actions">
-              {/* STT */}
-
-              <button
-                className={`icon-button ${recording ? "recording" : ""}`}
-                onClick={recording ? stopRecording : startRecording}
-                title={recording ? "Stop recording" : "Speech to Text"}
-              >
-                {recording ? "■" : "🎙"}
-              </button>
-
-              {/* FULL VOICE */}
-
-              <button
-                className={`voice-ai-button ${recording ? "recording" : ""}`}
-                onClick={recording ? stopRecording : startFullVoice}
-                disabled={voiceLoading}
-                title="Speech to Speech"
-              >
-                {voiceLoading ? "..." : "✦"}
-              </button>
-
-              {/* SEND */}
-
-              <button
-                className="send-button"
-                onClick={() => sendMessage()}
-                disabled={!message.trim() || loading || recording}
-                title="Send message"
-              >
-                ↑
-              </button>
-            </div>
-          </div>
-
-          <div className="input-hint">
-            <span>
-              <b>Enter</b> to send
-            </span>
-
-            <span>🎙 Speech to Text</span>
-
-            <span>✦ Voice AI</span>
-
-            <span>🔊 Text to Speech</span>
-          </div>
-        </section>
-
-        <footer>
-          AI Employee Assistant
-          <span>•</span>
-          NLP
-          <span>•</span>
-          LLM
-          <span>•</span>
-          RAG
-          <span>•</span>
-          Voice AI
-        </footer>
       </main>
     </div>
   );

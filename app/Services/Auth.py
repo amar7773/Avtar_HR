@@ -15,15 +15,15 @@ class AuthService:
                 "success": False,
                 "message": "Employee ID not found."
             }
-
         employee = experience.iloc[0]
-
         return {
             "success": True,
+            "message": "Login successful.",
             "employee": {
                 "employee_id": int(employee["employee_id"]),
                 "name": employee["name"],
                 "department": employee["department"],
-                "designation": employee["designation"]
+                "designation": employee["designation"],
+                "joining_date": str(employee["joining_date"])
             }
         }
