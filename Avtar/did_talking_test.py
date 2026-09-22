@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 DID_API_KEY = os.getenv("API_DI_ID")
-IMAGE_URL="https://img.magnific.com/premium-photo/human-male-avatar_930095-1312.jpg"
+IMAGE_URL="https://img.magnific.com/premium-photo/graphic-designer-digital-avatar-generative-ai_934475-9292.jpg"
 
 headers={
     "Authorization": f"Basic {DID_API_KEY}",
@@ -43,9 +43,15 @@ while True:
 
     print("Status:", data.get("status"))
 
-    if data.get("status") == "done":
-        print("\nVideo URL:")
-        print(data.get("result_url"))
+    if data.get("status")=="done":
+        vedio_url=data.get("result_url")
+        print("vedio_url:")
+        print(vedio_url)
+        vedio_response=requests.get(vedio_url)
+        with open("Avtar/generated_avatar.mp4","wb") as vedio_file:
+            vedio_file.write(vedio_response.content)
+        print("\n✅ Video saved successfully:")
+        print("Avtar/generated_avatar.mp4")
         break
     if data.get("status") == "error":
         print("\nError:")
