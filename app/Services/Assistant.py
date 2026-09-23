@@ -3,6 +3,8 @@ from app.Services.llm import LLMServices
 from Rag.rag_service import RAGSerivce
 from Voice.Stt import STTService
 from Voice.Tts import TTSService
+from Avtar.DID_Servicee import DIDService
+from Avtar.avtar_config import get_avatar
 
 class AssistantService:
     def __init__(self):
@@ -11,6 +13,7 @@ class AssistantService:
         self.rag_service=RAGSerivce()
         self.stt_service=STTService()
         self.tts_service=TTSService()
+        self.avatar = get_avatar()
 
     def process(self, user_query, employee_id):
         prediction = self.prediction_service.predict(user_query)
@@ -95,3 +98,19 @@ Give a clear and natural response.
         result["input_audio"] = audio_file
         result["response_audio"] = response_audio
         return result
+
+    def generate_avatar(self, text):
+        did_service = DIDService()
+        audio_file = self.tts_service.generate_speech(
+            text=text,
+            output_file="Voice/avatar_response.mp3",
+        )
+        avatar_result = did_service.generate_avatar_from_audio(
+            image_url=self.avatar["image_url"],
+            audio_path=audio_file,
+        )
+        return {
+            "audio_file": audio_file,
+            "talk_id": avatar_result["talk_id"],
+            "audio_url": avatar_result["audio_url"],
+        }
