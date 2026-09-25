@@ -108,6 +108,6 @@ urllib3==2.8.0
 uvicorn==0.53.0
 watchfiles==1.2.0
 websocket-client==1.9.2
-websockets==17.1
+websockets==16.0
 yarl==1.25.1
 google-genai==2.25.0
