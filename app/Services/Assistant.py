@@ -40,9 +40,10 @@ class AssistantService:
         # generation. This keeps exact values out of the model's guess space.
         structured = self.structured_router.route(user_query, employee_id)
         if structured is not None:
-            response = self.structured_router.format_result(
-                structured,
-                user_query
+            response = self.llm_service.generate_structured_response(
+                user_query=user_query,
+                employee_id=employee_id,
+                result=structured
             )
             return {
                 "user_query": user_query,

@@ -319,18 +319,27 @@ function App() {
     setLoading(true);
 
     try {
+      const requestStartedAt = Date.now();
       const response = await fetch(`${API_URL}/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_query: userText,
-          employee_id: String(
-            employee.employee_id
-          ),
-        }),
-      });
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_query: userText,
+            employee_id: String(
+              employee.employee_id
+            ),
+          }),
+        });
+
+      const minimumThinkingTime = 800;
+      const elapsed = Date.now() - requestStartedAt;
+      if (elapsed < minimumThinkingTime) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, minimumThinkingTime - elapsed);
+        });
+      }
 
       let data;
 

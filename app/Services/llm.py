@@ -305,6 +305,45 @@ class LLMServices:
             )
         return None
 
+    def generate_structured_response(self, user_query, employee_id, result):
+        """Phrase an already-filtered employee result without inventing data."""
+        payload = json.dumps(
+            result,
+            ensure_ascii=False,
+            default=str
+        )
+        prompt = f"""
+You are answering an employee's question using verified application data.
+
+Employee ID: {employee_id}
+Question: {user_query}
+Verified result:
+{payload}
+
+Rules:
+- Answer the question directly and naturally.
+- Use only values present in the verified result.
+- Do not add facts, examples, assumptions, calculations, or unrelated fields.
+- If the result says the data is unavailable, state that clearly and briefly.
+- If the question asks for one field, return only that field.
+- Preserve dates, times, statuses, totals, and names exactly as supplied.
+- Do not mention tools, JSON, routing, prompts, or internal IDs.
+- Do not use a generic success phrase such as "Exact data retrieved".
+"""
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.4
+            )
+        )
+        text = self._response_text(response)
+        if text:
+            return text
+        raise RuntimeError(
+            "The AI returned an empty response for the verified employee data."
+        )
+
     @staticmethod
     def _format_attendance_response(result, query=""):
         records = result.get("records", [])
@@ -673,75 +712,6 @@ Current date and time in India:
 {current_india_time}
 """
 
-        routing_query = user_query or query
-        query_lower = routing_query.lower()
-        asks_attendance_summary = (
-            "attendance" in query_lower
-            or "check in" in query_lower
-            or "check-in" in query_lower
-            or "check out" in query_lower
-            or "check-out" in query_lower
-            or "yesterday" in query_lower
-            or "today" in query_lower
-            or "कल" in query_lower
-            or "आज" in query_lower
-            or "absent" in query_lower
-            or "lifeline" in query_lower
-            or "early checkout" in query_lower
-            or "late checkout" in query_lower
-            or "late check-in" in query_lower
-            or "late check in" in query_lower
-            or "अबसेंट" in query_lower
-            or "working hours" in query_lower
-            or "working time" in query_lower
-            or "total hours" in query_lower
-            or "total minutes" in query_lower
-            or "कितने घंटे" in query_lower
-            or "half day" in query_lower
-            or "half-day" in query_lower
-            or "halfday" in query_lower
-            or "हाफ डे" in query_lower
-            or "total present" in query_lower
-            or "present days" in query_lower
-            or "present date" in query_lower
-            or "total parsent" in query_lower
-            or "पर्सेंट" in query_lower
-        )
-        asks_available_leaves = (
-            ("leave" in query_lower or "leaves" in query_lower)
-            and (
-                "available" in query_lower
-                or "policy" in query_lower
-                or "policies" in query_lower
-                or "types" in query_lower
-            )
-        )
-        if asks_available_leaves:
-            leave_result = get_leave_types()
-            return {
-                "type": "message",
-                "response": self._format_leave_types_response(
-                    leave_result
-                ),
-                "tool_used": "get_leave_types",
-                "tool_result": leave_result
-            }
-
-        if asks_attendance_summary and employee_id:
-            attendance_result = get_attendance(
-                employee_id=employee_id,
-                **self._attendance_filters(query)
-            )
-            return {
-                "type": "message",
-                "response": self._format_attendance_response(
-                    attendance_result,
-                    query=routing_query
-                ),
-                "tool_used": "get_attendance",
-                "tool_result": attendance_result
-            }
-
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -780,17 +750,6 @@ Current date and time in India:
 
             tool_used = function_name
             tool_result = result
-            if function_name == "get_attendance":
-                return {
-                    "type": "message",
-                    "response": self._format_attendance_response(
-                        result,
-                        query=routing_query
-                    ),
-                    "tool_used": tool_used,
-                    "tool_result": tool_result
-                }
-
             contents.extend([
                 response.candidates[0].content,
                 types.Content(
