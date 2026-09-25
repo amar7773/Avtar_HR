@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import re
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from google import genai
+import google.genai as genai
 from google.genai import types
 import json
 
