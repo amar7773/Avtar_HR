@@ -1,11 +1,12 @@
-employee_id,name,department,designation,joining_date
-101,Amar Singh,AI/ML,Python Developer,2024-07-15
-102,Rahul Sharma,Backend,Python Developer,2023-05-10
-103,Priya Mehta,Frontend,React Developer,2022-08-20
-104,Vikas Joshi,AI/ML,ML Engineer,2021-11-01
-105,Neha Verma,HR,HR Executive,2024-01-08
-106,Arjun Singh,Backend,Backend Developer,2023-09-18
-107,Karan Mehta,Frontend,Frontend Developer,2025-02-03
-108,Pooja Sharma,AI/ML,Data Scientist,2022-04-11
-109,Rohit Jain,QA,QA Engineer,2024-06-24
-110,Sneha Rathore,HR,HR Manager,2020-10-12
+﻿_id,employeeId,firstName,lastName,departmentId,designationId,branchId,shiftId,jobType,dateOfJoining,employmentStatus,status,isDeleted,deletedAt,managementLevel
+6a44a09b3e24124ff06a4bea,EMP-0001,Yashraj,Joshi,6a44aa013e24124ff06a544a,6a44aa5e3e24124ff06a5494,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-03-05T00:00:00Z,confirmed,active,false,,2
+6a44a1d53e24124ff06a4cf5,EMP-0002,VenuGopal,Jangid,6a44aa0b3e24124ff06a5454,6a44aa6e3e24124ff06a54a3,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-06-08T00:00:00Z,probation,active,false,,1
+6a44ab783e24124ff06a557f,EMP-0003,Mukan,Singh,6a44aa013e24124ff06a544a,6a44aa5e3e24124ff06a5494,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-03-05T00:00:00Z,confirmed,active,false,,1
+6a44abdc3e24124ff06a5641,EMP-0004,Bharat,Goyal,6a44aa2f3e24124ff06a5472,6a44aa973e24124ff06a54c1,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2024-04-01T00:00:00Z,confirmed,active,false,,1
+6a44acd53e24124ff06a5763,EMP-0008,Pradyuman,Paniya,6a44aa013e24124ff06a544a,6a44aa843e24124ff06a54b2,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-06-11T00:00:00Z,probation,active,false,,
+6a756bf021962872dcd3066f,EMP-0006,Vivek,Kumar,,,,,onsite,2026-08-07T05:24:00.326Z,probation,active,false,,
+6a83e75e6f3873f3ef148d65,EMP-0007,Sakshi,Kumawat,6a44aa013e24124ff06a544a,6a44aa843e24124ff06a54b2,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-07-22T00:00:00Z,probation,active,false,,1
+6a85628ee5c38eee648a2426,EMP-0010,lakshita,baghela,,,,,onsite,2026-08-19T08:00:14.443Z,probation,inactive,false,,1
+6a967f42ac7a75116d63c8cf,EMP-0011,Test,Employee,,,,,onsite,2026-09-01T00:00:00Z,probation,active,false,,
+6a9e5ac0747e9a82720fadb0,EMP-0012,Vijay,Gurjar,6a44aa0b3e24124ff06a5454,6a44aa6e3e24124ff06a54a3,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-08-12T00:00:00Z,confirmed,active,false,,0
+6a9e9607747e9a82720fd775,EMP-0013,Amar,Singh,6a44aa253e24124ff06a5468,6a44aab13e24124ff06a54ef,6a44a9ef3e24124ff06a5439,6a44a98f3e24124ff06a53e4,onsite,2026-09-07T00:00:00Z,probation,active,false,,0

@@ -1,0 +1,2 @@
+﻿_id,organizationId,name,code,description,address.line1,address.line2,address.city,address.state,address.pincode,address.country,defaultShiftId,workingDays,geo.latitude,geo.longitude,geo.radiusMeters,isHeadOffice,status,isDeleted,deletedAt,id,createdAt,updatedAt
+6a44a9ef3e24124ff06a5439,6a449eaf3e24124ff06a4a45,Pal Road Jodhpur,PAL,,Shyam Restaurant,Pal Road,Jodhpur,Rajasthan,342001,India,6a44a98f3e24124ff06a53e4,"[1,2,3,4,5]",26.262016,72.989686,100,true,active,false,,6a44a9ef3e24124ff06a5439,2026-07-01T05:47:27.362Z,2026-07-06T12:10:42.490Z

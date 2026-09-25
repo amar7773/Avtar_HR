@@ -8,8 +8,9 @@ class TTSService:
         self.client=ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
         self.voice_id=os.getenv("voice_id")
     def generate_speech(self,text,output_file="Voice/ai_response.mp3"):
-        if not text:
+        if not text or not str(text).strip():
             raise ValueError("Text is required for TTS.")
+        text = str(text).strip()
         if not self.voice_id:
             raise ValueError("ELEVENLABS_VOICE_ID is missing in .env")
         audio=self.client.text_to_speech.convert(

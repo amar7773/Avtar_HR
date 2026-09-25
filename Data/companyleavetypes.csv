@@ -1,0 +1,4 @@
+﻿_id,organizationId,name,code,description,daysPerYear,isPaid,carryForward,maxCarryForwardDays,minServiceDays,allowHalfDay,requiresApproval,status,isDeleted,deletedAt,id,createdAt,updatedAt,daysPerMonth
+6a44a9c23e24124ff06a5403,6a449eaf3e24124ff06a4a45,Casual Leave,CL,,12,true,false,0,0,true,false,active,false,,6a44a9c23e24124ff06a5403,2026-07-01T05:46:42.228Z,2026-07-14T10:30:20.250Z,2
+6a44b17a3e0b932ccd4d6e80,6a449eaf3e24124ff06a4a45,Medical Leave,ML,,12,true,false,0,0,false,false,active,false,,6a44b17a3e0b932ccd4d6e80,2026-07-01T06:19:38.045Z,2026-07-14T10:30:24.021Z,2
+6a4cb6055a6d21136efac043,6a449eaf3e24124ff06a4a45,Paid Leave,PL,,12,true,false,0,0,false,true,active,false,,6a4cb6055a6d21136efac043,2026-07-07T08:17:09.310Z,2026-07-14T10:30:27.385Z,2
