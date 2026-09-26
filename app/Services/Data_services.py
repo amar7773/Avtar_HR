@@ -18,6 +18,15 @@ class DataService:
             data["employeeId"] == employee_id
         ]
 
+    def get_company_employees(self, include_inactive=False):
+        employees = self.source.get_data("employees")
+        result = employees[employees["isDeleted"] == False]
+        if not include_inactive and "status" in result.columns:
+            result = result[
+                result["status"].astype(str).str.casefold() == "active"
+            ]
+        return result
+
     @staticmethod
     def _employee_keys(employee_id):
         """Return safe aliases used by the small CSV exports."""

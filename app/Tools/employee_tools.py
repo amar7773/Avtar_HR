@@ -1,5 +1,5 @@
 from app.Services.Data_services import DataService
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 from zoneinfo import ZoneInfo
 
@@ -35,11 +35,18 @@ def format_india_datetime(value):
             str(value).replace("Z", "+00:00")
         )
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=INDIA_TIMEZONE)
         india_time = parsed.astimezone(INDIA_TIMEZONE)
         return india_time.strftime("%Y-%m-%d %I:%M %p IST")
     except (TypeError, ValueError):
         return str(value)
+
+
+def date_only_value(value):
+    value = clean_value(value)
+    if value is None:
+        return None
+    return str(value).split("T", 1)[0].split(" ", 1)[0]
 
 
 def lifeline_markers(value):
@@ -87,7 +94,7 @@ def get_employee(employee_id):
         "employee_id": clean_value(employee["employeeId"]),
         "name": f"{employee['firstName']} {employee['lastName']}",
         "job_type": clean_value(employee["jobType"]),
-        "joining_date": clean_value(employee["dateOfJoining"]),
+        "joining_date": date_only_value(employee["dateOfJoining"]),
         "employment_status": clean_value(
             employee["employmentStatus"]
         ),
@@ -324,6 +331,76 @@ def get_leave_requests(
     return {
         "success": True,
         "records": records
+    }
+
+
+def get_leave_balance(employee_id):
+    leave_types = data_service.get_leave_types()
+    requests = data_service.get_leave_requests(employee_id)
+    if leave_types.empty:
+        return {
+            "success": False,
+            "message": "Leave entitlement data is not available."
+        }
+
+    approved = requests[
+        requests["status"].astype(str).str.casefold() == "approved"
+    ]
+    allocated = float(leave_types["daysPerYear"].fillna(0).sum())
+    used = float(approved["days"].fillna(0).sum())
+    remaining = max(allocated - used, 0)
+    values = {
+        "remaining_leaves": int(remaining) if remaining.is_integer() else remaining,
+        "allocated_leaves": int(allocated) if allocated.is_integer() else allocated,
+        "used_leaves": int(used) if used.is_integer() else used,
+    }
+    return {"success": True, **values}
+
+
+def get_lifeline_balance(employee_id, month=None, year=None):
+    attendance = get_attendance(
+        employee_id,
+        month=month,
+        year=year,
+    )
+    if not attendance.get("records"):
+        return {
+            "success": False,
+            "message": "No attendance data is available for lifeline calculation."
+        }
+
+    shift = data_service.get_employee_shift(employee_id)
+    if shift.empty:
+        return {
+            "success": False,
+            "message": "Shift limits are not available for lifeline calculation."
+        }
+
+    row = shift.iloc[0]
+    late_limit = float(row.get("lateCheckInLifelinesPerMonth") or 0)
+    early_limit = float(row.get("earlyCheckoutLifelinesPerMonth") or 0)
+    summary = attendance.get("summary", {})
+    late_remaining = max(
+        late_limit - summary.get("late_check_in_lifelines", 0),
+        0,
+    )
+    early_remaining = max(
+        early_limit - summary.get("late_check_out_lifelines", 0),
+        0,
+    )
+    return {
+        "success": True,
+        "late_check_in_remaining": (
+            int(late_remaining)
+            if late_remaining.is_integer()
+            else late_remaining
+        ),
+        "early_checkout_remaining": (
+            int(early_remaining)
+            if early_remaining.is_integer()
+            else early_remaining
+        ),
+        "period": attendance.get("summary", {}).get("month"),
     }
 
 

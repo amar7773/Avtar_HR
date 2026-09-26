@@ -1,4 +1,5 @@
 from app.Services.Data_services import DataService
+from app.Tools.employee_tools import date_only_value
 from pandas import isna
 
 
@@ -77,7 +78,9 @@ class AuthService:
                     self._clean_value(employee.get("shiftId", ""))
                 ),
                 "joining_date": str(
-                    self._clean_value(employee.get("dateOfJoining", ""))
+                    date_only_value(
+                        self._clean_value(employee.get("dateOfJoining", ""))
+                    )
                 ),
                 "employment_status": str(
                     self._clean_value(employee.get("employmentStatus", ""))

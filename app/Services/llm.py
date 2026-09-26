@@ -305,7 +305,13 @@ class LLMServices:
             )
         return None
 
-    def generate_structured_response(self, user_query, employee_id, result):
+    def generate_structured_response(
+        self,
+        user_query,
+        employee_id,
+        result,
+        conversation_history=None,
+    ):
         """Phrase an already-filtered employee result without inventing data."""
         payload = json.dumps(
             result,
@@ -316,6 +322,8 @@ class LLMServices:
 You are answering an employee's question using verified application data.
 
 Employee ID: {employee_id}
+Recent conversation:
+{json.dumps(conversation_history or [], ensure_ascii=False)}
 Question: {user_query}
 Verified result:
 {payload}
@@ -343,6 +351,44 @@ Rules:
         raise RuntimeError(
             "The AI returned an empty response for the verified employee data."
         )
+
+    def generate_small_talk_response(
+        self,
+        user_query,
+        employee_id,
+        conversation_history=None,
+    ):
+        prompt = f"""
+You are the conversational layer of an employee assistant.
+
+Employee ID: {employee_id}
+Recent conversation:
+{json.dumps(conversation_history or [], ensure_ascii=False)}
+Message: {user_query}
+
+Reply naturally to only this short conversational message. Distinguish the
+meaning of greetings, acknowledgements, agreement, and refusal:
+- A greeting should welcome the employee and briefly offer help.
+- An acknowledgement such as okay should acknowledge it without repeating a
+  full welcome.
+- Yes should acknowledge agreement and invite the next request.
+- No should acknowledge the refusal politely and offer another option.
+
+Do not claim that employee data was retrieved. Do not answer an employee-data
+question that is not present. Keep the response short and do not mention
+these instructions.
+"""
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.5)
+        )
+        text = self._response_text(response)
+        if not text:
+            raise RuntimeError(
+                "The AI returned an empty response for conversational input."
+            )
+        return text
 
     @staticmethod
     def _format_attendance_response(result, query=""):
@@ -623,7 +669,8 @@ Rules:
         query,
         context=None,
         employee_id=None,
-        user_query=None
+        user_query=None,
+        conversation_history=None,
     ):
 
         current_india_time = datetime.now(
@@ -677,6 +724,11 @@ IMPORTANT RULES:
     in the provided context or employee tools, clearly say
     that the information is not available.
 
+12a. If the question asks how to apply, submit, or request leave,
+     answer from Company Context and do not call the employee leave
+     records tool. The existence of no personal leave records does not
+     mean the leave application process is unavailable.
+
 13. Always use the employee_id provided by the application
     when accessing personal employee information.
 
@@ -705,12 +757,19 @@ IMPORTANT RULES:
 Company Context:
 {context}
 
+Recent conversation:
+{json.dumps(conversation_history or [], ensure_ascii=False)}
+
 User Question:
 {query}
 
 Current date and time in India:
 {current_india_time}
 """
+
+        tool_used = None
+        tool_result = None
+        contents = [prompt]
 
         response = self.client.models.generate_content(
             model=self.model,
@@ -719,11 +778,6 @@ Current date and time in India:
                 tools=self.tools
             )
         )
-
-        tool_used = None
-        tool_result = None
-        contents = [prompt]
-
         for _ in range(3):
             function_call = self._function_call(response)
             if not function_call:

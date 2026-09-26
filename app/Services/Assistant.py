@@ -6,6 +6,7 @@ from app.Services.structured_query import StructuredQueryRouter
 from Rag.rag_service import RAGSerivce
 from Voice.Stt import STTService
 from Voice.Tts import TTSService
+import re
 # from Avtar.DID_Servicee import DIDService
 # from Avtar.avtar_config import get_avatar
 
@@ -26,15 +27,35 @@ class AssistantService:
         self.stt_service = STTService()
 
         self.tts_service = TTSService()
+        self._conversation_history = {}
 
         # self.avatar = get_avatar()
 
 
     def process(self, user_query, employee_id):
+        history = self._conversation_history.get(str(employee_id), [])
 
         prediction = self.prediction_service.predict(
             user_query
         )
+
+        if self._is_small_talk(user_query):
+            response = self.llm_service.generate_small_talk_response(
+                user_query=user_query,
+                employee_id=employee_id,
+                conversation_history=history,
+            )
+            self._remember(employee_id, user_query, response)
+            return {
+                "user_query": user_query,
+                "intent": prediction["intent"],
+                "confidence": prediction["confidence"],
+                "entities": prediction["entities"],
+                "response": response,
+                "tool_used": None,
+                "tool_result": None,
+                "rag_context": None,
+            }
 
         # Resolve supported employee data deterministically before retrieval or
         # generation. This keeps exact values out of the model's guess space.
@@ -45,6 +66,7 @@ class AssistantService:
                 employee_id=employee_id,
                 result=structured
             )
+            self._remember(employee_id, user_query, response)
             return {
                 "user_query": user_query,
                 "intent": prediction["intent"],
@@ -110,11 +132,13 @@ IMPORTANT:
 """
 
         result = self.llm_service.genreate_response(
-            prompt,
+            user_query,
             context,
             employee_id=employee_id,
-            user_query=user_query
+            user_query=user_query,
+            conversation_history=history,
         )
+        self._remember(employee_id, user_query, result["response"])
 
         return {
             "user_query": user_query,
@@ -126,6 +150,25 @@ IMPORTANT:
             "tool_result": result.get("tool_result"),
             "rag_context": context
         }
+
+    def _remember(self, employee_id, user_query, response):
+        history = self._conversation_history.setdefault(str(employee_id), [])
+        history.extend([
+            {"role": "user", "content": user_query},
+            {"role": "assistant", "content": response},
+        ])
+        del history[:-12]
+
+    @staticmethod
+    def _is_small_talk(user_query):
+        normalized = re.sub(r"[.!?,]+", "", user_query.casefold())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        tokens = {
+            "hello", "hi", "hey", "hola", "namaste", "नमस्ते",
+            "ok", "okay", "ठीक", "ठीक है", "yes", "yeah", "yep",
+            "haan", "हाँ", "no", "nope", "nah", "nahi", "नहीं",
+        }
+        return normalized in tokens
 
 
     def process_voice(self, audio_file, employee_id):
@@ -167,8 +210,10 @@ IMPORTANT:
 
         result = self.process(
             user_query=user_query,
-            employee_id=employee_id
+            employee_id=employee_id,
+            conversation_history=history,
         )
+        self._remember(employee_id, user_query, response)
 
         audio_file = self.tts_service.generate_speech(
             text=result["response"],

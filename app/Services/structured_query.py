@@ -9,8 +9,11 @@ from zoneinfo import ZoneInfo
 
 from app.Services.Data_services import DataService
 from app.Tools.employee_tools import (
+    date_only_value,
     format_india_datetime,
     get_attendance as attendance_tool,
+    get_leave_balance as leave_balance_tool,
+    get_lifeline_balance as lifeline_balance_tool,
 )
 
 
@@ -121,13 +124,85 @@ class StructuredQueryRouter:
         )
         normalized = normalized.replace("lifline", "lifeline")
         normalized = normalized.replace("chek", "check")
+        normalized = normalized.replace("cehck", "check")
         normalized = normalized.replace("shifiting", "shifting")
         previous = self._context.get(str(employee_id), {})
+        correction = any(term in normalized for term in (
+            "not", "nahi", "nahin", "नहीं", "no"
+        ))
+        if (
+            correction
+            and previous.get("kind") == "attendance"
+            and previous.get("intent") == "lifeline_balance"
+            and "check in" in normalized
+        ):
+            normalized = "my remaining late check in lifeline"
+            q = normalized
+        elif (
+            correction
+            and previous.get("kind") == "attendance"
+            and previous.get("intent") == "lifeline_balance"
+            and "check out" in normalized
+        ):
+            normalized = "my remaining early check out lifeline"
+            q = normalized
         if any(term in normalized for term in (
             "us din", "that day", "same day", "usi date"
         )) and previous.get("filters", {}).get("date"):
             normalized = f"{normalized} {previous['filters']['date']}"
             q = normalized
+        if any(term in normalized for term in (
+            "apply for leave", "apply leave", "leave apply",
+            "how to apply", "how can i apply", "leave process",
+            "leave procedure", "kaise apply", "kese apply", "कैसे लागू",
+        )):
+            return None
+        company_employee_query = (
+            any(term in normalized for term in (
+                "company employee", "employees in company",
+                "company employees", "employees in my company",
+                "total employee",                 "employee count", "employee names", "employees count",
+                "all employee", "employees name", "staff count",
+                "company me kitne employee", "company mein kitne employee",
+                "sabke name", "सभी कर्मचारी", "कुल कर्मचारी",
+            ))
+            or (
+                "company" in normalized
+                and ("employee" in normalized or "employees" in normalized)
+                and any(term in normalized for term in (
+                    "total", "count", "how many", "kitne", "name", "names",
+                    "sabke"
+                ))
+            )
+            and not any(term in normalized for term in (
+                "my employee", "my profile", "mera employee"
+            ))
+        )
+        if company_employee_query:
+            frame = self.data.get_company_employees(
+                include_inactive=any(term in normalized for term in (
+                    "inactive", "all employees", "सभी"
+                ))
+            )
+            if frame.empty:
+                return self._missing("company employee")
+            records = []
+            for _, row in frame.iterrows():
+                name = " ".join(
+                    str(value).strip()
+                    for value in (row.get("firstName"), row.get("lastName"))
+                    if value == value and str(value).strip()
+                )
+                records.append({
+                    "employee_id": row.get("employeeId"),
+                    "name": name,
+                })
+            data = {"total_employees": len(records)}
+            if any(term in normalized for term in (
+                "name", "names", "sabke", "सभी"
+            )):
+                data["employees"] = records
+            return self._result("get_company_employees", data)
         if "company" in normalized and "name" in normalized:
             return self._missing(
                 "company name",
@@ -140,7 +215,12 @@ class StructuredQueryRouter:
         if not employee_id or not personal and not any(
             word in q for word in ("attendance", "salary", "वेतन", "leave", "छुट्टी", "project", "profile", "experience", "designation", "branch", "shift", "joining", "hours", "check in", "check out", "us din", "that day")
         ):
-            if any(word in q for word in ("available leave", "leaves available", "leaves are available", "leave type", "leave policy", "छुट्टी के प्रकार", "छुट्टी नीति")):
+            if any(word in q for word in (
+                "available leave", "leaves available", "leaves are available",
+                "leave type", "leave policy", "which leaves", "what leaves",
+                "kon kon", "kaun kaun", "कौन कौन", "छुट्टी के प्रकार",
+                "छुट्टी नीति"
+            )):
                 pass
             else:
                 return None
@@ -151,7 +231,12 @@ class StructuredQueryRouter:
             "half day", "late", "last attendance", "hours worked", "hours"
         )):
             kind = "attendance"
-        elif any(word in q for word in ("leave type", "leave policy", "available leave", "leaves available", "leaves are available", "leave milti", "छुट्टी के प्रकार", "छुट्टी नीति")):
+        elif any(word in q for word in (
+            "leave type", "leave policy", "available leave",
+            "leaves available", "leaves are available", "leave milti",
+            "which leaves", "what leaves", "kon kon", "kaun kaun",
+            "कौन कौन", "छुट्टी के प्रकार", "छुट्टी नीति"
+        )):
             kind = "leave_types"
         elif any(word in q for word in ("salary", "वेतन", "pay", "payslip")):
             kind = "salary"
@@ -185,7 +270,8 @@ class StructuredQueryRouter:
             row = frame.iloc[0]
             profile = {"employee_id": str(row.get("employeeId")),
                 "name": f"{row.get('firstName', '')} {row.get('lastName', '')}".strip(),
-                "joining_date": row.get("dateOfJoining"), "job_type": row.get("jobType"),
+                "joining_date": date_only_value(row.get("dateOfJoining")),
+                "job_type": row.get("jobType"),
                 "employment_status": row.get("employmentStatus"), "status": row.get("status")}
             if "complete" in q or "all details" in q or "full" in q:
                 profile.update({
@@ -328,43 +414,42 @@ class StructuredQueryRouter:
             if any(term in normalized for term in (
                 "remaining", "left", "bachi", "bacchi", "बची", "बचती"
             )):
-                shift = self.data.get_employee_shift(employee_id)
-                if shift.empty:
-                    return self._missing("lifeline balance")
-                shift_row = shift.iloc[0]
-                late_limit = float(
-                    shift_row.get("lateCheckInLifelinesPerMonth") or 0
+                balance_result = lifeline_balance_tool(
+                    employee_id,
+                    month=filters.get("month"),
+                    year=filters.get("year"),
                 )
-                early_limit = float(
-                    shift_row.get("earlyCheckoutLifelinesPerMonth") or 0
-                )
-                late_remaining = max(
-                    late_limit - summary.get("late_check_in_lifelines", 0), 0
-                )
-                early_remaining = max(
-                    early_limit - summary.get("late_check_out_lifelines", 0), 0
-                )
-                late_remaining = (
-                    int(late_remaining)
-                    if late_remaining.is_integer()
-                    else late_remaining
-                )
-                early_remaining = (
-                    int(early_remaining)
-                    if early_remaining.is_integer()
-                    else early_remaining
-                )
-                if "late check" in normalized:
-                    balance = {"late_check_in_remaining": late_remaining}
-                elif "early check" in normalized or "check out" in normalized:
-                    balance = {"early_checkout_remaining": early_remaining}
+                if not balance_result.get("success"):
+                    return self._missing(
+                        "lifeline balance",
+                        balance_result.get("message"),
+                    )
+                if "check in" in normalized and "check out" not in normalized:
+                    balance = {
+                        "late_check_in_remaining":
+                            balance_result["late_check_in_remaining"]
+                    }
+                elif "check out" in normalized:
+                    balance = {
+                        "early_checkout_remaining":
+                            balance_result["early_checkout_remaining"]
+                    }
                 else:
                     balance = {
-                        "late_check_in_remaining": late_remaining,
-                        "early_checkout_remaining": early_remaining,
+                        "late_check_in_remaining":
+                            balance_result["late_check_in_remaining"],
+                        "early_checkout_remaining":
+                            balance_result["early_checkout_remaining"],
                     }
                 balance["period"] = summary.get("month")
-                return self._result("get_attendance_summary", balance)
+                result = self._result("get_attendance_summary", balance)
+                self._context[str(employee_id)] = {
+                    "filters": dict(filters),
+                    "kind": kind,
+                    "intent": "lifeline_balance",
+                    "result": result,
+                }
+                return result
             requested = {}
             if "late check" in normalized or "late_check_in" in normalized:
                 requested["late_check_in_lifelines"] = summary.get(
@@ -421,9 +506,23 @@ class StructuredQueryRouter:
                 prefix = f"{filters['year']}-{filters['month']:02d}"
                 frame = frame[frame["fromDate"].astype(str).str.startswith(prefix)]
             if any(term in normalized for term in (
-                "leaves left", "leave balance", "remaining", "bachi", "left"
+                "leaves left", "leave balance", "remaining",
+                "bachi", "bacchi", "left"
             )):
-                return self._leave_balance(employee_id, frame)
+                balance = leave_balance_tool(employee_id)
+                if not balance.get("success"):
+                    return self._missing(
+                        "leave balance",
+                        balance.get("message"),
+                    )
+                return self._result(
+                    "get_leave_balance",
+                    {
+                        key: value
+                        for key, value in balance.items()
+                        if key != "success"
+                    },
+                )
             if any(term in normalized for term in (
                 "leaves used", "used leaves", "use kari", "used", "utilized"
             )):

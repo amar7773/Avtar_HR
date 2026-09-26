@@ -31,8 +31,70 @@ const QUICK_ACTIONS = [
   },
 ];
 
+function formatIndiaTimestamps(text) {
+  const isoTimestamp =
+    /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/g;
+  const utcTime =
+    /\b(\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b/g;
+
+  const formattedDates = text.replace(isoTimestamp, (value) => {
+    const dateOnlyTimestamp =
+      /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.0+)?(?:Z|\+00:00)$/.exec(value);
+
+    if (dateOnlyTimestamp) {
+      const date = new Date(`${dateOnlyTimestamp[1]}T00:00:00Z`);
+
+      return new Intl.DateTimeFormat("en-IN", {
+        timeZone: "UTC",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      }).format(date);
+    }
+
+    const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value);
+    const date = new Date(hasTimezone ? value : `${value}Z`);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    const timeZone = hasTimezone ? "Asia/Kolkata" : "UTC";
+
+    return (
+      new Intl.DateTimeFormat("en-IN", {
+        timeZone,
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      }).format(date) + " IST"
+    );
+  });
+
+  return formattedDates.replace(utcTime, (value) => {
+    const date = new Date(`1970-01-01T${value}`);
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return (
+      new Intl.DateTimeFormat("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      }).format(date) + " IST"
+    );
+  });
+}
+
 function FormattedMessage({ content }) {
-  const lines = String(content || "").split("\n");
+  const formattedContent = formatIndiaTimestamps(String(content || ""));
+  const lines = formattedContent.split("\n");
 
   return (
     <div className="formatted-message">
@@ -40,6 +102,7 @@ function FormattedMessage({ content }) {
         const heading = line.startsWith("### ");
         const text = heading ? line.slice(4) : line;
         const parts = text.split(/(\*\*[^*]+\*\*)/g);
+
         return (
           <div
             className={heading ? "formatted-heading" : ""}
@@ -53,6 +116,7 @@ function FormattedMessage({ content }) {
                   </strong>
                 );
               }
+
               return <span key={partIndex}>{part}</span>;
             })}
           </div>
