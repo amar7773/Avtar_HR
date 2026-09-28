@@ -6,16 +6,13 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from app.Services.Assistant import AssistantService
-from app.Services.Auth import AuthService
 from fastapi.staticfiles import StaticFiles
+from threading import Lock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VOICE_DIR = PROJECT_ROOT / "Voice"
 VOICE_DIR.mkdir(parents=True, exist_ok=True)
-
-auth_service = AuthService()
 
 app = FastAPI(
     title="AI Employee Assistant",
@@ -43,7 +40,36 @@ app.add_middleware(
 )
 
 
-assistant = AssistantService()
+assistant = None
+assistant_lock = Lock()
+auth_service = None
+auth_service_lock = Lock()
+
+
+def get_auth_service():
+    global auth_service
+
+    if auth_service is None:
+        with auth_service_lock:
+            if auth_service is None:
+                from app.Services.Auth import AuthService
+
+                auth_service = AuthService()
+
+    return auth_service
+
+
+def get_assistant():
+    global assistant
+
+    if assistant is None:
+        with assistant_lock:
+            if assistant is None:
+                from app.Services.Assistant import AssistantService
+
+                assistant = AssistantService()
+
+    return assistant
 
 
 class LoginRequest(BaseModel):
@@ -83,7 +109,7 @@ def home():
 @app.post("/login")
 def login(request: LoginRequest):
 
-    result = auth_service.login(request.employee_id)
+    result = get_auth_service().login(request.employee_id)
 
     if not result["success"]:
         return result
@@ -94,7 +120,7 @@ def login(request: LoginRequest):
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    result = assistant.process(
+    result = get_assistant().process(
         user_query=request.user_query,
         employee_id=request.employee_id
     )
@@ -112,7 +138,7 @@ def text_to_speech(request: TTSRequest):
             detail="Text is required."
         )
 
-    audio_file = assistant.tts_service.generate_speech(
+    audio_file = get_assistant().tts_service.generate_speech(
         text=text,
         output_file=str(VOICE_DIR / "api_response.mp3")
     )
@@ -133,7 +159,7 @@ async def speech_to_text(audio: UploadFile = File(...)):
         with input_audio_path.open("wb") as file:
             file.write(await audio.read())
 
-        text = assistant.stt_service.transcribe(
+        text = get_assistant().stt_service.transcribe(
             str(input_audio_path)
         )
 
@@ -156,7 +182,7 @@ async def voice(
         with input_audio_path.open("wb") as file:
             file.write(await audio.read())
 
-        result = assistant.process_speech_to_speech(
+        result = get_assistant().process_speech_to_speech(
             audio_file=str(input_audio_path),
             employee_id=employee_id
         )

@@ -200,31 +200,19 @@ IMPORTANT:
                 "rag_context": None,
                 "error": str(e)
             }
-
-
-    def process_text_to_speech(
-        self,
-        user_query,
-        employee_id
-    ):
-
-        result = self.process(
-            user_query=user_query,
-            employee_id=employee_id,
-            conversation_history=history,
-        )
-        self._remember(employee_id, user_query, response)
-
+    def process_text_to_speech(self,user_query,employee_id):
+        result = self.process(user_query=user_query,employee_id=employee_id)
+        response = result.get("response", "").strip()
+        if not response:
+            raise ValueError("No response generated.")
         audio_file = self.tts_service.generate_speech(
-            text=result["response"],
-            output_file=str(self.voice_dir / "ai_response.mp3")
+        text=response,
+        output_file=str(
+            self.voice_dir / "ai_response.mp3"
         )
-
+    )
         result["audio_file"] = audio_file
-
         return result
-
-
     def process_speech_to_speech(
         self,
         audio_file,

@@ -1,12 +1,19 @@
-from sentence_transformers import SentenceTransformer
 from Rag.vectore_store import VectorStore
 
 class RAGSerivce:
     def __init__(self):
-        self.model=SentenceTransformer("all-MiniLM-L6-v2")
+        self.model = None
         self.vectore_store=VectorStore()
+
+    def _get_model(self):
+        if self.model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self.model
+
     def retrive(self,query,top_k=3):
-        query_embedding=self.model.encode(query)
+        query_embedding=self._get_model().encode(query)
         results=self.vectore_store.search(
             query_embedding,
             top_k=top_k
