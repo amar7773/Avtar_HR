@@ -1,12 +1,30 @@
 import os
-import asyncio
-import edge_tts
+from pathlib import Path
+from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
+
+load_dotenv()
 
 
 class TTSService:
 
     def __init__(self):
-        self.voice = "en-IN-PrabhatNeural"
+        self.api_key = os.getenv("ELEVENLABS_API_KEY")
+        self.voice_id = os.getenv("voice_id")
+
+        if not self.api_key or not self.api_key.strip():
+            raise ValueError(
+                "Configuration error: 'ELEVENLABS_API_KEY' is missing from the environment or .env file."
+            )
+
+        if not self.voice_id or not self.voice_id.strip():
+            raise ValueError(
+                "Configuration error: 'voice_id' is missing from the environment or .env file."
+            )
+
+        # Conversational low-latency multilingual model (natively supports Hindi, English, Hinglish)
+        self.model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
+        self.client = ElevenLabs(api_key=self.api_key.strip())
 
     def generate_speech(
         self,
@@ -17,51 +35,26 @@ class TTSService:
             raise ValueError("Text is required for TTS.")
 
         text = str(text).strip()
+        print(f"TTS voice: {self.voice_id}")
+        print(f"TTS output: {output_file}")
 
-        os.makedirs(
-            os.path.dirname(output_file) or ".",
-            exist_ok=True
-        )
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            loop = asyncio.get_running_loop()
-
-        except RuntimeError:
-            asyncio.run(
-                self._generate(
-                    text,
-                    output_file
-                )
+            audio_stream = self.client.text_to_speech.convert(
+                voice_id=self.voice_id.strip(),
+                text=text,
+                model_id=self.model_id,
+                output_format="mp3_44100_128",
             )
 
-        else:
-            import concurrent.futures
+            with open(output_path, "wb") as f:
+                for chunk in audio_stream:
+                    if chunk:
+                        f.write(chunk)
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=1
-            ) as executor:
+        except Exception as e:
+            raise RuntimeError(f"ElevenLabs TTS failed: {e}") from e
 
-                future = executor.submit(
-                    asyncio.run,
-                    self._generate(
-                        text,
-                        output_file
-                    )
-                )
-
-                future.result()
-
-        return output_file
-
-    async def _generate(
-        self,
-        text,
-        output_file
-    ):
-        communicate = edge_tts.Communicate(
-            text,
-            self.voice,
-            rate="+5%"
-        )
-
-        await communicate.save(output_file)
+        return str(output_path)

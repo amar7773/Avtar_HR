@@ -171,8 +171,24 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [voiceLoading, setVoiceLoading] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const mediaRecorderRef = useRef(null);
+  const streamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const vadTimerRef = useRef(null);
+  const animFrameRef = useRef(null);
   const [audioUrl, setAudioUrl] = useState(null);
   const [userAudioUrl, setUserAudioUrl] = useState(null);
+  const [avatarVideoUrl, setAvatarVideoUrl] = useState(null);
+  const [avatarImageUrl, setAvatarImageUrl] = useState(
+    `${API_URL}/avatar-files/avtar_img.jpg`
+  );
+  const [avatarState, setAvatarState] = useState("idle");
+  const [latestUserText, setLatestUserText] = useState("");
+  const [latestAiResponse, setLatestAiResponse] = useState("");
+  const activeAudioRef = useRef(null);
+  const pollIntervalRef = useRef(null);
+
   const [voiceCompact, setVoiceCompact] = useState(false);
   const [toast, setToast] = useState("");
 
@@ -244,6 +260,42 @@ function App() {
       }
     };
   }, [userAudioUrl]);
+
+  useEffect(() => {
+    fetch(`${API_URL}/avatar/info`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.image_url) {
+          setAvatarImageUrl(`${API_URL}${data.image_url}`);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+      if (activeAudioRef.current) {
+        activeAudioRef.current.pause();
+      }
+      if (vadTimerRef.current) {
+        clearTimeout(vadTimerRef.current);
+      }
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+        } catch {}
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
 
   const notify = (text) => {
     setToast(text);
@@ -343,6 +395,14 @@ function App() {
   };
 
   const logout = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current = null;
+    }
     localStorage.removeItem("employee_id");
     localStorage.removeItem("employee");
 
@@ -353,6 +413,10 @@ function App() {
     setLoginId("");
     setLoginError("");
     setAudioUrl(null);
+    setAvatarVideoUrl(null);
+    setAvatarState("idle");
+    setLatestUserText("");
+    setLatestAiResponse("");
     setActivePage("assistant");
     setSidebarOpen(false);
   };
@@ -462,6 +526,33 @@ function App() {
     }
   };
 
+  const stopRecording = () => {
+    if (vadTimerRef.current) {
+      clearTimeout(vadTimerRef.current);
+      vadTimerRef.current = null;
+    }
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch {}
+      audioContextRef.current = null;
+    }
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== "inactive"
+    ) {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (err) {
+        console.warn("Stop recorder error:", err);
+      }
+    }
+  };
+
   const startRecorder = async (onBlob) => {
     if (
       recording ||
@@ -482,16 +573,69 @@ function App() {
     }
 
     try {
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: true,
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
         });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      streamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream);
+      // Real-time audio level analyser for live visualizer wave
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          audioContextRef.current = audioCtx;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.3;
+          source.connect(analyser);
+
+          const pcmData = new Uint8Array(analyser.frequencyBinCount);
+
+          const checkLevel = () => {
+            if (!streamRef.current) return;
+            analyser.getByteFrequencyData(pcmData);
+            let sum = 0;
+            for (let i = 0; i < pcmData.length; i++) {
+              sum += pcmData[i];
+            }
+            const avg = sum / pcmData.length;
+            const volumePercent = Math.min(100, Math.round((avg / 128) * 100));
+            setAudioLevel(volumePercent);
+            animFrameRef.current = requestAnimationFrame(checkLevel);
+          };
+          animFrameRef.current = requestAnimationFrame(checkLevel);
+        }
+      } catch (audioCtxErr) {
+        console.warn("AudioContext meter error:", audioCtxErr);
+      }
+
+      // Max safety duration: 40 seconds
+      vadTimerRef.current = setTimeout(() => {
+        stopRecording();
+      }, 40000);
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: 128000,
+      });
+      mediaRecorderRef.current = recorder;
       const chunks = [];
 
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
+        if (event.data && event.data.size > 0) {
           chunks.push(event.data);
         }
       };
@@ -501,25 +645,44 @@ function App() {
           "Recorder error:",
           event
         );
-
-        stream
-          .getTracks()
-          .forEach((track) => track.stop());
-
-        setRecording(false);
-        setMediaRecorder(null);
-
+        stopRecording();
         notify("Microphone recording failed.");
       };
 
       recorder.onstop = async () => {
-        stream
-          .getTracks()
-          .forEach((track) => track.stop());
+        if (vadTimerRef.current) {
+          clearTimeout(vadTimerRef.current);
+          vadTimerRef.current = null;
+        }
+        if (animFrameRef.current) {
+          cancelAnimationFrame(animFrameRef.current);
+          animFrameRef.current = null;
+        }
+        if (audioContextRef.current) {
+          try {
+            audioContextRef.current.close();
+          } catch {}
+          audioContextRef.current = null;
+        }
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+
+        setRecording(false);
+        setMediaRecorder(null);
+        setAudioLevel(0);
 
         const blob = new Blob(chunks, {
-          type: "audio/webm",
+          type: mimeType,
         });
+
+        if (blob.size < 500) {
+          notify("No speech detected. Please speak into the microphone.");
+          setVoiceLoading(false);
+          setAvatarState("idle");
+          return;
+        }
 
         try {
           await onBlob(blob);
@@ -528,7 +691,7 @@ function App() {
         }
       };
 
-      recorder.start();
+      recorder.start(250);
 
       setMediaRecorder(recorder);
       setRecording(true);
@@ -537,24 +700,13 @@ function App() {
         "Microphone permission error:",
         error
       );
-
+      stopRecording();
       notify(
         "Please allow microphone access from your browser."
       );
     }
   };
 
-  const stopRecording = () => {
-    if (
-      mediaRecorder &&
-      mediaRecorder.state !== "inactive"
-    ) {
-      mediaRecorder.stop();
-    }
-
-    setRecording(false);
-    setMediaRecorder(null);
-  };
 
   const startSTT = () =>
     startRecorder(async (audioBlob) => {
@@ -658,9 +810,144 @@ function App() {
     }
   };
 
-  const startVoiceAI = () =>
-    startRecorder(async (audioBlob) => {
+  const pollAvatarVideo = (talkId) => {
+    if (!talkId || talkId === "None") return;
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+
+    let attempts = 0;
+    const maxAttempts = 10; // 10 * 2s = 20 seconds max
+
+    pollIntervalRef.current = setInterval(async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(`${API_URL}/avatar/status/${talkId}`);
+        if (!response.ok) {
+          throw new Error("Failed to check avatar status");
+        }
+        const statusData = await response.json();
+
+        if (statusData.status === "done" && statusData.video_url) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+
+          if (activeAudioRef.current) {
+            activeAudioRef.current.pause();
+            activeAudioRef.current = null;
+          }
+
+          const fullVideoUrl = statusData.video_url.startsWith("http")
+            ? statusData.video_url
+            : `${API_URL}${statusData.video_url}`;
+
+          setAvatarVideoUrl(fullVideoUrl);
+        } else if (statusData.status === "error" || statusData.status === "idle" || attempts >= maxAttempts) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          if (statusData.error) {
+            console.warn("Avatar video background info:", statusData.error);
+          }
+        }
+      } catch (err) {
+        console.warn("Avatar status check error:", err);
+        if (attempts >= maxAttempts) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      }
+    }, 2000);
+  };
+
+  const handleAvatarVideoEnded = () => {
+    setAvatarVideoUrl(null);
+    setAvatarState("idle");
+  };
+
+  const triggerGreeting = async () => {
+    try {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      if (activeAudioRef.current) {
+        activeAudioRef.current.pause();
+        activeAudioRef.current = null;
+      }
+
+      setAvatarState("greeting");
+      const res = await fetch(`${API_URL}/avatar/greeting`);
+      if (!res.ok) throw new Error("Greeting request failed");
+      const data = await res.json();
+
+      setLatestAiResponse(
+        data.text ||
+          "Hi, I'm your AI employee assistant. How can I help you today?"
+      );
+      setLatestUserText("");
+
+      if (data.video_url) {
+        const fullVideo = data.video_url.startsWith("http")
+          ? data.video_url
+          : `${API_URL}${data.video_url}`;
+        setAvatarVideoUrl(fullVideo);
+        setAvatarState("greeting");
+      } else if (data.audio_url) {
+        const audio = new Audio(`${API_URL}${data.audio_url}`);
+        activeAudioRef.current = audio;
+        setAvatarState("speaking");
+        audio.onended = () => {
+          setAvatarState("idle");
+          activeAudioRef.current = null;
+        };
+        await audio
+          .play()
+          .catch((e) => console.warn("Greeting audio play blocked:", e));
+      } else {
+        setAvatarState("idle");
+      }
+    } catch (err) {
+      console.warn("Avatar greeting error:", err);
+      setAvatarState("idle");
+    }
+  };
+
+  useEffect(() => {
+    if (activePage === "avtar") {
+      triggerGreeting();
+    } else {
+      if (avatarVideoUrl) {
+        setAvatarVideoUrl(null);
+      }
+      if (activeAudioRef.current) {
+        activeAudioRef.current.pause();
+        activeAudioRef.current = null;
+      }
+    }
+  }, [activePage]);
+
+  const startVoiceAI = (explicitMode = null) => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause();
+      activeAudioRef.current = null;
+    }
+
+    const mode = explicitMode || (activePage === "avtar" ? "avatar_mode" : "voice_mode");
+
+    if (mode === "avatar_mode") {
+      setAvatarVideoUrl(null);
+      setAvatarState("listening");
+    }
+
+    return startRecorder(async (audioBlob) => {
       setVoiceLoading(true);
+      if (mode === "avatar_mode") {
+        setAvatarState("thinking");
+      }
       setVoiceCompact(false);
 
       try {
@@ -668,33 +955,21 @@ function App() {
           URL.revokeObjectURL(userAudioUrl);
         }
 
-        setUserAudioUrl(URL.createObjectURL(audioBlob));
+        const blobUrl = URL.createObjectURL(audioBlob);
+        setUserAudioUrl(blobUrl);
 
         const formData = new FormData();
+        formData.append("audio", audioBlob, "employee_voice.webm");
+        formData.append("employee_id", String(employee.employee_id));
+        formData.append("mode", mode);
 
-        formData.append(
-          "audio",
-          audioBlob,
-          "employee_voice.webm"
-        );
-
-        formData.append(
-          "employee_id",
-          String(employee.employee_id)
-        );
-
-        const response = await fetch(
-          `${API_URL}/voice`,
-          {
-            method: "POST",
-            body: formData,
-          }
-        );
+        const response = await fetch(`${API_URL}/voice`, {
+          method: "POST",
+          body: formData,
+        });
 
         if (!response.ok) {
-          throw new Error(
-            "Voice assistant request failed."
-          );
+          throw new Error("Voice assistant request failed.");
         }
 
         const data = await response.json();
@@ -702,70 +977,106 @@ function App() {
           throw new Error("Voice response did not include audio.");
         }
 
+        const userText = data.user_text || "Voice message";
+        const aiResponse = data.response || "Your voice request has been processed.";
         const url = `${API_URL}${data.audio_url}`;
 
-        setAudioUrl(url);
+        if (mode === "avatar_mode") {
+          // --- AVATAR MODE ---
+          // 1. Update live Avatar conversation dialogue
+          setLatestUserText(userText);
+          setLatestAiResponse(aiResponse);
 
-        const audio = new Audio(url);
+          // 2. Play ElevenLabs avatar voice IMMEDIATELY - Zero delay!
+          const avatarAudio = new Audio(url);
+          activeAudioRef.current = avatarAudio;
+          avatarAudio.playbackRate = 1.0;
+          setAvatarState("speaking");
+          avatarAudio.onended = () => {
+            if (!avatarVideoUrl) {
+              setAvatarState("idle");
+            }
+            activeAudioRef.current = null;
+          };
+          avatarAudio.play().catch((e) => console.warn("Avatar voice autoplay restricted:", e));
 
-        audio.playbackRate = 0.9;
+          // 3. In background, check if D-ID avatar video finishes
+          if (data?.avatar_video_url) {
+            const vUrl = data.avatar_video_url.startsWith("http")
+              ? data.avatar_video_url
+              : `${API_URL}${data.avatar_video_url}`;
+            setAvatarVideoUrl(vUrl);
+          } else {
+            const talkId = data?.avatar_talk_id || data?.avatar?.talk_id;
+            if (talkId && talkId !== "None") {
+              pollAvatarVideo(talkId);
+            }
+          }
+        } else {
+          // --- VOICE MODE (Assistant tab) ---
+          setLatestUserText(userText);
+          setLatestAiResponse(aiResponse);
+          setAudioUrl(url);
 
-        await audio.play();
-        setVoiceCompact(true);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Date.now(),
+              role: "user",
+              content: userText,
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+              voice: true,
+            },
+            {
+              id: Date.now() + 1,
+              role: "assistant",
+              content: aiResponse,
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+              voice: true,
+            },
+          ]);
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now(),
-            role: "user",
-            content:
-              data.user_text ||
-              "Voice message",
-            time: new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-            voice: true,
-          },
-          {
-            id: Date.now() + 1,
-            role: "assistant",
-            content:
-              data.response ||
-              "Your voice request has been processed.",
-            time: new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-            voice: true,
-          },
-        ]);
+          const audio = new Audio(url);
+          activeAudioRef.current = audio;
+          audio.playbackRate = 1.0;
+          audio.play().catch((e) => console.warn("Audio autoplay blocked:", e));
+          setVoiceCompact(true);
+        }
       } catch (error) {
-        console.error(
-          "Voice assistant error:",
-          error
-        );
+        console.error("Voice assistant error:", error);
+        setAvatarState("idle");
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now(),
-            role: "assistant",
-            error: true,
-            content:
-              "Sorry, I couldn't process your voice request.",
-            time: new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-          },
-        ]);
+        if (mode !== "avatar_mode") {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Date.now(),
+              role: "assistant",
+              error: true,
+              content: "Sorry, I couldn't process your voice request.",
+              time: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+            },
+          ]);
+        } else {
+          notify("Could not process your voice. Please try speaking again.");
+        }
       } finally {
         setVoiceLoading(false);
-        setRecording(false);
-        setMediaRecorder(null);
       }
     });
+  };
+
+
+
 
   const clearChat = () => {
     if (!employee) {
@@ -1035,7 +1346,25 @@ function App() {
           />
         )}
 
-        {activePage === "avtar" && <AvtarPage />}
+        {activePage === "avtar" && (
+          <AvtarPage
+            avatarImageUrl={avatarImageUrl}
+            avatarVideoUrl={avatarVideoUrl}
+            avatarState={avatarState}
+            setAvatarState={setAvatarState}
+            setAvatarVideoUrl={setAvatarVideoUrl}
+            recording={recording}
+            voiceLoading={voiceLoading}
+            audioLevel={audioLevel}
+            startVoiceAI={() => startVoiceAI("avatar_mode")}
+            stopRecording={stopRecording}
+            latestUserText={latestUserText}
+            latestAiResponse={latestAiResponse}
+            onVideoEnded={handleAvatarVideoEnded}
+            onReplayGreeting={triggerGreeting}
+          />
+        )}
+
 
         {activePage === "settings" && (
           <Settings
@@ -1055,7 +1384,7 @@ function App() {
             recording={recording}
             voiceLoading={voiceLoading}
             startSTT={startSTT}
-            startVoiceAI={startVoiceAI}
+            startVoiceAI={() => startVoiceAI("voice_mode")}
             stopRecording={stopRecording}
             generateSpeech={generateSpeech}
             copyMessage={copyMessage}
@@ -1139,24 +1468,314 @@ function CompanyLogo({ className = "" }) {
   );
 }
 
-function AvtarPage() {
+function AvtarPage({
+  avatarImageUrl,
+  avatarVideoUrl,
+  avatarState = "idle",
+  setAvatarVideoUrl,
+  setAvatarState,
+  recording = false,
+  voiceLoading = false,
+  audioLevel = 0,
+  startVoiceAI,
+  stopRecording,
+  latestUserText = "",
+  latestAiResponse = "",
+  onVideoEnded,
+  onReplayGreeting,
+}) {
+  const videoRef = useRef(null);
+  const [isMuted, setIsMuted] = useState(false);
+
+  useEffect(() => {
+    if (avatarVideoUrl && videoRef.current) {
+      videoRef.current.currentTime = 0;
+      videoRef.current.muted = false;
+      setIsMuted(false);
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn("Unmuted autoplay restricted, trying muted preview:", err);
+          if (videoRef.current) {
+            videoRef.current.muted = true;
+            setIsMuted(true);
+            videoRef.current.play().catch(() => {});
+          }
+        });
+      }
+    }
+  }, [avatarVideoUrl]);
+
+  const handleMicClick = () => {
+    if (recording) {
+      stopRecording?.();
+    } else if (!voiceLoading) {
+      startVoiceAI?.();
+    }
+  };
+
+  const handleVideoEnded = () => {
+    if (onVideoEnded) {
+      onVideoEnded();
+    } else {
+      setAvatarVideoUrl?.(null);
+      setAvatarState?.("idle");
+    }
+  };
+
+  const getStatusConfig = () => {
+    if (recording || avatarState === "listening") {
+      return {
+        label: "Listening...",
+        className: "listening",
+        icon: "🎙️",
+      };
+    }
+    if (voiceLoading || avatarState === "thinking") {
+      return {
+        label: "Thinking...",
+        className: "thinking",
+        icon: "✨",
+      };
+    }
+    if (avatarState === "greeting") {
+      return {
+        label: "Greeting...",
+        className: "greeting",
+        icon: "👋",
+      };
+    }
+    if (avatarVideoUrl || avatarState === "speaking") {
+      return {
+        label: avatarVideoUrl ? "Avtar Speaking" : "Speaking...",
+        className: "speaking",
+        icon: "🔊",
+      };
+    }
+    if (avatarState === "preparing") {
+      return {
+        label: "Generating Lip-sync...",
+        className: "preparing",
+        icon: "⏳",
+      };
+    }
+    return {
+      label: "Ready to Talk",
+      className: "idle",
+      icon: "🟢",
+    };
+  };
+
+  const status = getStatusConfig();
+
   return (
     <section className="page avtar-page">
       <div className="avtar-card">
-        <CompanyLogo className="avtar-logo" />
-        <span className="eyebrow">AVTAR EXPERIENCE</span>
-        <h1>Talk with Avtar</h1>
-        <p>
-          Your Avtar conversation experience will appear here. This frontend
-          section is ready for the Avtar integration.
-        </p>
-        <button className="primary-button avtar-button" type="button" disabled>
-          Avtar integration coming soon
-        </button>
+        {/* Header */}
+        <div className="avatar-header-row">
+          <CompanyLogo className="avtar-logo-compact" />
+          <div className="avatar-title-wrap">
+            <span className="eyebrow">AI EMPLOYEE ASSISTANT</span>
+            <h1>Talk with Avtar</h1>
+          </div>
+          <div className="avatar-header-actions">
+            {onReplayGreeting && (
+              <button
+                type="button"
+                className="avatar-replay-chip"
+                onClick={onReplayGreeting}
+                title="Replay greeting"
+                disabled={recording || voiceLoading}
+              >
+                <span>👋</span> Replay
+              </button>
+            )}
+            <div className={`avatar-status-pill ${status.className}`}>
+              <span className="status-pill-icon">{status.icon}</span>
+              <span className="status-pill-text">{status.label}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Two-column body */}
+        <div className="avatar-body-row">
+
+          {/* LEFT: Avatar stage */}
+          <div
+            className={`avatar-stage ${status.className} ${
+              avatarVideoUrl ? "has-video" : ""
+            }`}
+            onClick={() => {
+              if (videoRef.current && videoRef.current.muted) {
+                videoRef.current.muted = false;
+                setIsMuted(false);
+              }
+            }}
+            title={avatarVideoUrl ? "Click to unmute" : ""}
+          >
+            <div className="avatar-ambient-halo" />
+            <div className="avatar-blink-overlay" />
+
+            {avatarVideoUrl ? (
+              <>
+                <video
+                  ref={videoRef}
+                  className="avatar-video"
+                  src={avatarVideoUrl}
+                  autoPlay
+                  playsInline
+                  onEnded={handleVideoEnded}
+                />
+                {isMuted && (
+                  <button
+                    type="button"
+                    className="avatar-unmute-overlay-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (videoRef.current) {
+                        videoRef.current.muted = false;
+                        videoRef.current.currentTime = 0;
+                        videoRef.current.play().catch(() => {});
+                        setIsMuted(false);
+                      }
+                    }}
+                  >
+                    🔊 Unmute
+                  </button>
+                )}
+              </>
+            ) : (
+              <img
+                className="avatar-image"
+                src={avatarImageUrl || "/avatar-files/avtar_img.jpg"}
+                alt="Avtar - AI Employee Assistant"
+                onError={(e) => {
+                  if (!e.currentTarget.src.includes("/avatar-files/avtar_img.jpg")) {
+                    e.currentTarget.src = "/avatar-files/avtar_img.jpg";
+                  }
+                }}
+              />
+            )}
+
+            {status.className === "listening" && (
+              <div className="avatar-live-indicator listening">
+                <div className="radar-ring ring-1" />
+                <div className="radar-ring ring-2" />
+                <span className="indicator-chip">Listening...</span>
+              </div>
+            )}
+            {status.className === "thinking" && (
+              <div className="avatar-live-indicator thinking">
+                <span className="spinner-orbit" />
+                <span className="indicator-chip">Processing...</span>
+              </div>
+            )}
+            {status.className === "greeting" && (
+              <div className="avatar-live-indicator greeting">
+                <span className="sparkle-icon">✦</span>
+                <span className="indicator-chip">Greeting</span>
+              </div>
+            )}
+            {status.className === "speaking" && (
+              <div className="avatar-live-indicator speaking">
+                <div className="soundwave-equalizer">
+                  <span className="bar bar-1" />
+                  <span className="bar bar-2" />
+                  <span className="bar bar-3" />
+                  <span className="bar bar-4" />
+                  <span className="bar bar-5" />
+                </div>
+                <span className="indicator-chip">Speaking</span>
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT: Transcript + Mic */}
+          <div className="avatar-controls-panel">
+
+            {recording && (
+              <div className="avatar-live-visualizer">
+                <div className="visualizer-bars">
+                  {[14, 30, 50, 80, 100, 65, 45, 25, 12].map((h, i) => {
+                    const sc = Math.max(6, Math.min(28, Math.round((h * (audioLevel + 15)) / 100)));
+                    return (
+                      <span
+                        key={i}
+                        className="live-wave-bar"
+                        style={{ height: `${sc}px` }}
+                      />
+                    );
+                  })}
+                </div>
+                <span className="visualizer-caption">
+                  {audioLevel > 10 ? "Speaking detected..." : "Speak now..."}
+                </span>
+              </div>
+            )}
+
+            {(latestUserText || latestAiResponse) ? (
+              <div className="avatar-transcript-panel">
+                {latestUserText && (
+                  <div className="transcript-row you-row">
+                    <span className="transcript-badge you-badge">You</span>
+                    <span className="transcript-text">{latestUserText}</span>
+                  </div>
+                )}
+                {latestAiResponse && (
+                  <div className="transcript-row avtar-row">
+                    <span className="transcript-badge avtar-badge">Avtar</span>
+                    <div className="transcript-text">
+                      <FormattedMessage content={latestAiResponse} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="avatar-transcript-empty">
+                <span className="transcript-empty-icon">💬</span>
+                <p>Your conversation appears here.</p>
+                <small>Tap mic and start speaking.</small>
+              </div>
+            )}
+
+            <div className="avatar-action-deck">
+              <button
+                type="button"
+                className={`avatar-mic-trigger ${status.className}`}
+                onClick={handleMicClick}
+                disabled={voiceLoading}
+                title={recording ? "Click to finish" : "Click to speak"}
+              >
+                <span className="mic-trigger-icon">
+                  {recording ? "⏹" : voiceLoading ? "⏳" : "🎙"}
+                </span>
+                <span className="mic-trigger-text">
+                  {recording
+                    ? "Finish Speaking"
+                    : voiceLoading
+                    ? "Thinking..."
+                    : avatarVideoUrl || avatarState === "speaking"
+                    ? "Ask Another Question"
+                    : "Tap to Speak"}
+                </span>
+              </button>
+              <span className="avatar-hint-caption">
+                {recording
+                  ? "Tap Finish Speaking when done."
+                  : voiceLoading
+                  ? "Generating ElevenLabs voice..."
+                  : "Hindi, English or Hinglish — any language."}
+              </span>
+            </div>
+
+          </div>
+        </div>
       </div>
     </section>
   );
 }
+
+
 
 function LoginScreen({
   loginId,

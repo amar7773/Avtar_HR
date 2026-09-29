@@ -1,4 +1,17 @@
+import sys
 from pathlib import Path
+
+# Ensure Windows terminal doesn't crash on Devanagari or Unicode prints
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from app.Services.prediction import IntentPredictionService
 from app.Services.llm import LLMServices
@@ -7,8 +20,8 @@ from Rag.rag_service import RAGSerivce
 from Voice.Stt import STTService
 from Voice.Tts import TTSService
 import re
-# from Avtar.DID_Servicee import DIDService
-# from Avtar.avtar_config import get_avatar
+from Avtar.DID_Servicee import DIDService
+from Avtar.avtar_config import get_avatar
 
 
 class AssistantService:
@@ -29,7 +42,7 @@ class AssistantService:
         self.tts_service = TTSService()
         self._conversation_history = {}
 
-        # self.avatar = get_avatar()
+        self.avatar = get_avatar()
 
 
     def process(self, user_query, employee_id):
@@ -64,7 +77,8 @@ class AssistantService:
             response = self.llm_service.generate_structured_response(
                 user_query=user_query,
                 employee_id=employee_id,
-                result=structured
+                result=structured,
+                conversation_history=history,
             )
             self._remember(employee_id, user_query, response)
             return {
@@ -216,59 +230,135 @@ IMPORTANT:
     def process_speech_to_speech(
         self,
         audio_file,
-        employee_id
+        employee_id,
+        mode="avatar_mode"
     ):
-
-        user_text = self.stt_service.transcribe(
-            audio_file
-        )
+        try:
+            user_text = self.stt_service.transcribe(audio_file)
+        except Exception as stt_err:
+            print(f"[STT RETRY]: {stt_err}")
+            response_text = "Aapki aawaz theek se sunayi nahi di, kripya dobara bolein."
+            response_audio = self.tts_service.generate_speech(
+                text=response_text,
+                output_file=str(self.voice_dir / "ai_response.mp3")
+            )
+            return {
+                "mode": mode,
+                "user_query": "",
+                "response": response_text,
+                "input_audio": audio_file,
+                "response_audio": response_audio,
+                "avatar": {
+                    "talk_id": None,
+                    "status": "idle",
+                    "video_url": None,
+                },
+            }
 
         if not user_text or not user_text.strip():
-            raise ValueError(
-                "No speech was detected in the uploaded audio."
+            response_text = "Aapki aawaz theek se sunayi nahi di, kripya dobara bolein."
+            response_audio = self.tts_service.generate_speech(
+                text=response_text,
+                output_file=str(self.voice_dir / "ai_response.mp3")
             )
+            return {
+                "mode": mode,
+                "user_query": "",
+                "response": response_text,
+                "input_audio": audio_file,
+                "response_audio": response_audio,
+                "avatar": {
+                    "talk_id": None,
+                    "status": "idle",
+                    "video_url": None,
+                },
+            }
 
-        result = self.process(
-            user_query=user_text.strip(),
-            employee_id=employee_id
-        )
-
+        result = self.process(user_query=user_text.strip(), employee_id=employee_id)
         response_text = (result.get("response") or "").strip()
         if not response_text:
-            response_text = (
-                "I could not generate a response for that request. "
-                "Please try again."
-            )
-            result["response"] = response_text
-
+            response_text = "Main aapka request samajh nahi paya, kripya dobara poochein."
+        result["response"] = response_text
         response_audio = self.tts_service.generate_speech(
             text=response_text,
             output_file=str(self.voice_dir / "ai_response.mp3")
         )
 
+        result["mode"] = mode
         result["input_audio"] = audio_file
-
         result["response_audio"] = response_audio
+
+        if mode == "avatar_mode":
+            print(f"Avatar input audio: {response_audio}")
+            self._latest_avatar_status = {
+                "status": "processing",
+                "talk_id": None,
+                "video_url": None,
+            }
+
+            import threading
+
+            def _bg_generate(audio_path):
+                try:
+                    res = self.start_avatar(audio_path)
+                    self._latest_avatar_status["talk_id"] = res.get("talk_id")
+                    self._latest_avatar_status["status"] = "processing"
+                except Exception as error:
+                    print(f"[AVATAR WARNING] Background avatar generation failed: {error}")
+                    self._latest_avatar_status["status"] = "idle"
+
+            threading.Thread(target=_bg_generate, args=(response_audio,), daemon=True).start()
+
+            result["avatar"] = {
+                "talk_id": "latest",
+                "status": "processing",
+                "video_url": None,
+            }
+        else:
+            result["avatar"] = {
+                "talk_id": None,
+                "status": "idle",
+                "video_url": None,
+            }
 
         return result
 
+    def get_current_avatar(self):
+        try:
+            return get_avatar()
+        except Exception:
+            return self.avatar
 
-    # def generate_avatar(self, text):
+    def start_avatar(self, audio_file):
+        print(f"Avatar input audio: {audio_file}")
+        current_avatar = self.get_current_avatar()
+        image_url = current_avatar.get("image_url")
+        if not image_url:
+            raise ValueError("No avatar image_url configured for D-ID.")
 
-    #     did_service = DIDService()
+        did_service = DIDService()
+        talk_info = did_service.start_talking_avatar_from_audio(
+            image_url=image_url,
+            audio_path=audio_file,
+        )
+        return {
+            "audio_file": audio_file,
+            "talk_id": talk_info["talk_id"],
+            "audio_url": talk_info["audio_url"],
+            "status": "processing",
+            "video_url": None,
+        }
 
-    #     audio_file = self.tts_service.generate_speech(
-    #         text=text,
-    #         output_file="Voice/avatar_response.mp3",
-    #     )
-
-    #     avatar_result = did_service.generate_avatar_from_audio(
-    #         image_url=self.avatar["image_url"],
-    #         audio_path=audio_file,
-    #     )
-
-    #     return {
-    #         "audio_file": audio_file,
-    #         "talk_id": avatar_result["talk_id"],
-    #         "audio_url": avatar_result["audio_url"],
-    #     }
+    def generate_avatar(self, audio_file):
+        did_service = DIDService()
+        current_avatar = self.get_current_avatar()
+        avatar_result = did_service.generate_avatar_from_audio(
+            image_url=current_avatar.get("image_url", self.avatar.get("image_url")),
+            audio_path=audio_file,
+        )
+        return {
+            "audio_file": audio_file,
+            "talk_id": avatar_result["talk_id"],
+            "audio_url": avatar_result["audio_url"],
+            "video_url": avatar_result.get("video_url"),
+        }

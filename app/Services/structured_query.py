@@ -151,6 +151,17 @@ class StructuredQueryRouter:
         )) and previous.get("filters", {}).get("date"):
             normalized = f"{normalized} {previous['filters']['date']}"
             q = normalized
+        elif (
+            previous.get("kind") in ("attendance", "salary", "leave")
+            and not any(term in normalized for term in ("attendance", "salary", "leave", "project", "profile", "employee"))
+            and (
+                any(name in normalized for name in MONTHS)
+                or any(name in normalized for name in HINDI_MONTHS)
+                or any(term in normalized for term in ("wali", "wala", "wale", "ki", "ka", "ke", "pichle", "last", "this", "previous"))
+            )
+        ):
+            normalized = f"{previous['kind']} {normalized}"
+            q = normalized
         if any(term in normalized for term in (
             "apply for leave", "apply leave", "leave apply",
             "how to apply", "how can i apply", "leave process",
@@ -244,7 +255,9 @@ class StructuredQueryRouter:
             "leave request", "leave requests", "leave history", "my leave",
             "my leaves", "show my leaves", "leaves left", "leave balance",
             "leaves used", "approved leaves", "pending leave",
-            "छुट्टी आवेदन", "मेरी छुट्टी"
+            "छुट्टी आवेदन", "मेरी छुट्टी", "kitni leave", "kitni leaves",
+            "leaves bachi", "leave bachi", "chutti bachi", "chhutti bachi",
+            "kitni chutti", "kitni chhutti"
         )):
             kind = "leave"
         elif "leave" in normalized or "leaves" in normalized or "छुट्टी" in normalized:

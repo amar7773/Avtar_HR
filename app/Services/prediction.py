@@ -17,10 +17,25 @@ class IntentPredictionService:
         confidence = max(probabilities)
         entities=self.entity_extractor.extract(query)
         previous_context = self.context.get()
-        is_follow_up=self.context.is_follow_up(query)
-        if is_follow_up and previous_context:
-            intent=previous_context["intent"]
+        is_follow_up = self.context.is_follow_up(query)
+        q_lower = query.casefold()
+        domain_keywords = {
+            "leave": ["leave", "leaves", "chutti", "chhutti", "छुट्टी"],
+            "attendance": ["attendance", "check in", "check out", "उपस्थिति", "हाजिरी"],
+            "salary": ["salary", "pay", "payslip", "वेतन"],
+            "holiday": ["holiday", "holidays", "त्योहार", "छुट्टियां"],
+            "profile": ["profile", "designation", "shift", "branch"]
+        }
+        has_explicit_domain = any(
+            any(w in q_lower for w in words)
+            for words in domain_keywords.values()
+        )
+        is_qualifier = any(w in q_lower for w in ("wali", "wala", "us din", "that day", "ki?", "ka?"))
+
+        if (is_follow_up or is_qualifier) and previous_context and not has_explicit_domain:
+            intent = previous_context["intent"]
             entities = {**previous_context.get("entities", {}), **entities}
+
         self.context.update(
             intent,
             entities

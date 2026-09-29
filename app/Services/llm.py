@@ -20,6 +20,28 @@ from app.Tools.employee_tools import (
 load_dotenv()
 
 
+def detect_language_mode(query: str) -> str:
+    if re.search(r"[\u0900-\u097F]", query):
+        return "Hindi (Devanagari)"
+
+    hinglish_markers = {
+        "kya", "kyu", "kyun", "kaise", "kese", "kitna", "kitni", "kitne",
+        "hai", "hain", "ho", "tha", "thi", "the", "mera", "meri", "mere",
+        "mujhe", "mujhko", "apna", "apni", "apne", "humara", "humaari",
+        "batao", "bataye", "batana", "chahiye", "karo", "karna", "diya",
+        "wali", "wala", "wale", "aur", "bhi", "kab", "kahan", "kisko",
+        "chhutti", "chutti", "aaj", "kal", "parson", "pichle", "agla",
+        "agli", "ab", "haan", "nahi", "nahin", "theek", "shukriya",
+        "dhanyawad", "namaste", "pranam", "karni", "karta", "karte",
+        "raha", "rahi", "rahe", "bhejo", "dekhna", "dikhao", "mein",
+        "me", "se", "ko", "ke", "ki", "ka"
+    }
+    tokens = set(re.findall(r"\b[a-zA-Z]+\b", query.casefold()))
+    if tokens & hinglish_markers:
+        return "Hinglish (Hindi written in Roman English alphabet)"
+    return "English"
+
+
 class LLMServices:
 
     INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
@@ -273,7 +295,6 @@ class LLMServices:
                 employee_id=arguments["employee_id"]
             )
 
-        return None
 
     def generate_structured_response(
         self,
@@ -282,7 +303,7 @@ class LLMServices:
         result,
         conversation_history=None,
     ):
-
+        lang_mode = detect_language_mode(user_query)
         payload = json.dumps(
             result,
             ensure_ascii=False,
@@ -292,6 +313,7 @@ class LLMServices:
 You are answering an employee's question using verified application data.
 
 Employee ID: {employee_id}
+Detected User Language: {lang_mode}
 Recent conversation:
 {json.dumps(conversation_history or [], ensure_ascii=False)}
 
@@ -301,10 +323,19 @@ Verified result:
 {payload}
 
 Rules:
-- Answer the question directly and naturally.
-- Use only values present in the verified result.
+- LANGUAGE MATCHING (STRICT):
+  * The user asked in: {lang_mode}.
+  * YOU MUST REPLY IN THE EXACT SAME LANGUAGE ({lang_mode})!
+  * If Hindi (Devanagari) -> Reply in clear, natural Hindi.
+  * If Hinglish (Roman script, e.g. "meri leave kitni hai", "kya main present tha", "salary batao", "attendance dikhao") -> Reply in natural, conversational Hinglish (e.g. "Aapki 36 leaves bachi hain.").
+  * If English -> Reply in English.
+  * NEVER translate Hindi/Hinglish questions into English responses.
+- RESPONSE LENGTH (STRICT):
+  * Keep the response strictly to 1 to 3 short sentences or maximum 3 concise bullet points.
+  * Do NOT generate long explanations, tips, articles, introductions, or generic conclusions. Answer only what was asked.
+- Answer the question directly and naturally using only values present in the verified result.
 - Do not add facts, assumptions, calculations or unrelated fields.
-- If the result says the data is unavailable, state that clearly.
+- If the result says the data is unavailable, state that clearly in the matching language.
 - If the question asks for one field, return only that field.
 - Preserve dates, times, statuses, totals and names exactly as supplied.
 - Do not mention tools, JSON, routing, prompts or internal IDs.
@@ -319,7 +350,7 @@ Rules:
                     "content": prompt
                 }
             ],
-            temperature=0.4
+            temperature=0.3
         )
 
         text = self._response_text(response)
@@ -346,17 +377,17 @@ Recent conversation:
 {json.dumps(conversation_history or [], ensure_ascii=False)}
 Message: {user_query}
 
-Reply naturally to only this short conversational message. Distinguish the
-meaning of greetings, acknowledgements, agreement, and refusal:
-- A greeting should welcome the employee and briefly offer help.
-- An acknowledgement such as okay should acknowledge it without repeating a
-  full welcome.
-- Yes should acknowledge agreement and invite the next request.
-- No should acknowledge the refusal politely and offer another option.
-
-Do not claim that employee data was retrieved. Do not answer an employee-data
-question that is not present. Keep the response short and do not mention
-these instructions.
+Rules:
+- LANGUAGE MATCHING (STRICT):
+  * If the employee speaks in Hindi or Hinglish (e.g. "namaste", "kaise ho", "theek hai", "kya haal hai"), reply in friendly, natural Hindi / Hinglish.
+  * If in English, reply in English.
+- LENGTH: Keep response strictly to 1 short sentence (maximum 2).
+- Distinguish greetings, acknowledgements, agreement, and refusal:
+  * A greeting should welcome the employee and briefly offer help.
+  * An acknowledgement such as okay should acknowledge it without repeating a full welcome.
+  * Yes should acknowledge agreement and invite the next request.
+  * No should acknowledge the refusal politely and offer another option.
+- Do not claim employee data was retrieved. Do not answer an employee-data question that is not present.
 """
 
         response = self.client.chat.completions.create(
@@ -748,6 +779,7 @@ these instructions.
         conversation_history=None,
     ):
 
+        lang_mode = detect_language_mode(query)
         current_india_time = datetime.now(
             self.INDIA_TIMEZONE
         ).strftime("%Y-%m-%d %I:%M %p IST")
@@ -756,11 +788,26 @@ You are an AI Employee Assistant.
 
 Help employees with employee data, company information and general questions.
 
+DETECTED USER LANGUAGE: {lang_mode}
+YOU MUST REPLY IN: {lang_mode}
+
+LANGUAGE MATCHING (CRITICAL):
+- ALWAYS reply in the EXACT SAME language the employee used ({lang_mode}):
+  * If Hindi: reply in natural Hindi.
+  * If Hinglish: reply in natural conversational Hinglish.
+  * If English: reply in English.
+- Never translate Hindi or Hinglish questions into English responses.
+
+RESPONSE LENGTH & FORMAT (CRITICAL):
+- Keep responses SHORT, direct, and conversational: 1 to 3 short sentences or maximum 3 concise bullet points.
+- Do NOT generate long articles, introductions, tips, conclusions, or essays. Answer only what was asked.
+- For leave process (e.g. "leaves kaise apply karte hain?"): give only the actual, concise steps from Company Context.
+
 EMPLOYEE AND COMPANY QUESTIONS:
 - Use the appropriate employee tool when personal employee data is required.
 - Use Company Context for company-specific information.
 - Never invent employee data or company policies.
-- Always use the employee_id provided by the application.
+- Always use the employee_id provided by the application ({employee_id}). Never ask the user for their employee ID.
 - For attendance use get_attendance.
 - For leave requests use get_leave_requests.
 - For leave policy use get_leave_types.
@@ -771,7 +818,7 @@ EMPLOYEE AND COMPANY QUESTIONS:
 - For designation use get_employee_designation.
 
 GENERAL QUESTIONS:
-- If the question is not related to employee or company data, answer it directly using your general knowledge.
+- If the question is not related to employee or company data, answer it directly using your general knowledge in the same language.
 - Do not call employee tools for general questions.
 - Do not force general questions into employee or company context.
 - Do not say information is unavailable just because it is not present in Company Context.
