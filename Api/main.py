@@ -34,6 +34,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.mount(
     "/voice-files",
@@ -47,16 +62,19 @@ app.mount(
 )
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.on_event("startup")
+def startup_warmup():
+    import threading
+
+    def _warm():
+        try:
+            asst = get_assistant()
+            if hasattr(asst, "rag_service"):
+                asst.rag_service._get_model()
+        except Exception as e:
+            print(f"[WARMUP INFO] Background warmup: {e}")
+
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 assistant = None
@@ -253,6 +271,7 @@ async def voice(
     avatar = result.get("avatar") or {}
     return {
         "mode": result.get("mode", mode),
+        "language": result.get("language", "English"),
         "user_text": result.get("user_query", ""),
         "response": result.get("response", ""),
         "audio_url": f"/voice-files/{Path(response_audio).name}",
@@ -301,11 +320,9 @@ def get_avatar_status(talk_id: str):
                         r = requests.get(result_url, timeout=30)
                         if r.status_code == 200:
                             temp_path.write_bytes(r.content)
-                            orig_audio = VOICE_DIR / "ai_response.mp3"
                             did_service.composite_full_avatar(
                                 str(temp_path),
                                 str(local_path),
-                                original_audio_path=str(orig_audio) if orig_audio.exists() else None,
                             )
                             temp_path.unlink(missing_ok=True)
                     if local_path.exists() and local_path.stat().st_size > 10000:

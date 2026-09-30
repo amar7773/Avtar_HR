@@ -1,15 +1,24 @@
+import os
+
+# Prevent slow unauthenticated HuggingFace Hub checks on every model load
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 from Rag.vectore_store import VectorStore
 
 class RAGSerivce:
     def __init__(self):
         self.model = None
-        self.vectore_store=VectorStore()
+        self.vectore_store = VectorStore()
 
     def _get_model(self):
         if self.model is None:
             from sentence_transformers import SentenceTransformer
 
-            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+            try:
+                self.model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
+            except Exception:
+                self.model = SentenceTransformer("all-MiniLM-L6-v2")
         return self.model
 
     def retrive(self,query,top_k=3):

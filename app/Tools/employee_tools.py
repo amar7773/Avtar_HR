@@ -17,6 +17,15 @@ def clean_value(value):
         return None
 
     try:
+        import numpy as np
+        if isinstance(value, (np.integer, np.floating)):
+            return value.item()
+        if isinstance(value, np.bool_):
+            return bool(value)
+    except Exception:
+        pass
+
+    try:
         if value != value:  # NaN
             return None
     except:
@@ -343,16 +352,50 @@ def get_leave_balance(employee_id):
             "message": "Leave entitlement data is not available."
         }
 
-    approved = requests[
-        requests["status"].astype(str).str.casefold() == "approved"
-    ]
-    allocated = float(leave_types["daysPerYear"].fillna(0).sum())
-    used = float(approved["days"].fillna(0).sum())
-    remaining = max(allocated - used, 0)
+    approved = (
+        requests[requests["status"].astype(str).str.casefold() == "approved"]
+        if not requests.empty
+        else requests.iloc[0:0]
+    )
+
+    breakdown = []
+    total_allocated = 0.0
+    total_used = 0.0
+
+    for _, row in leave_types.iterrows():
+        lt_id = str(row.get("_id") or row.get("id"))
+        alloc = float(row.get("daysPerYear") or 0)
+        used = (
+            float(
+                approved[approved["leaveTypeId"].astype(str) == lt_id]["days"]
+                .fillna(0)
+                .sum()
+            )
+            if not approved.empty
+            else 0.0
+        )
+        rem = max(alloc - used, 0.0)
+        total_allocated += alloc
+        total_used += used
+
+        breakdown.append({
+            "name": clean_value(row.get("name")),
+            "code": clean_value(row.get("code")),
+            "allocated": int(alloc) if alloc.is_integer() else alloc,
+            "used": int(used) if used.is_integer() else used,
+            "remaining": int(rem) if rem.is_integer() else rem,
+        })
+
+    total_remaining = max(total_allocated - total_used, 0.0)
+
     values = {
-        "remaining_leaves": int(remaining) if remaining.is_integer() else remaining,
-        "allocated_leaves": int(allocated) if allocated.is_integer() else allocated,
-        "used_leaves": int(used) if used.is_integer() else used,
+        "leave_types": breakdown,
+        "total_allocated": int(total_allocated) if total_allocated.is_integer() else total_allocated,
+        "total_used": int(total_used) if total_used.is_integer() else total_used,
+        "total_remaining": int(total_remaining) if total_remaining.is_integer() else total_remaining,
+        "remaining_leaves": int(total_remaining) if total_remaining.is_integer() else total_remaining,
+        "allocated_leaves": int(total_allocated) if total_allocated.is_integer() else total_allocated,
+        "used_leaves": int(total_used) if total_used.is_integer() else total_used,
     }
     return {"success": True, **values}
 

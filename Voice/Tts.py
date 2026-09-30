@@ -25,21 +25,39 @@ class TTSService:
         # Conversational low-latency multilingual model (natively supports Hindi, English, Hinglish)
         self.model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
         self.client = ElevenLabs(api_key=self.api_key.strip())
+        self.cache_dir = Path(__file__).resolve().parent / "cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def generate_speech(
         self,
         text,
         output_file="Voice/ai_response.mp3"
     ):
+        import hashlib
+        import shutil
+
         if not text or not str(text).strip():
             raise ValueError("Text is required for TTS.")
 
         text = str(text).strip()
-        print(f"TTS voice: {self.voice_id}")
-        print(f"TTS output: {output_file}")
-
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cache_key = hashlib.md5(
+            f"{self.voice_id}_{self.model_id}_{text}".encode("utf-8")
+        ).hexdigest()
+        cached_file = self.cache_dir / f"{cache_key}.mp3"
+
+        if cached_file.exists() and cached_file.stat().st_size > 1000:
+            try:
+                if cached_file.resolve() != output_path.resolve():
+                    shutil.copy2(cached_file, output_path)
+                return str(output_path)
+            except Exception:
+                return str(cached_file)
+
+        print(f"TTS voice: {self.voice_id} (generating new audio)")
+        print(f"TTS output: {output_file}")
 
         try:
             audio_stream = self.client.text_to_speech.convert(
@@ -49,12 +67,20 @@ class TTSService:
                 output_format="mp3_44100_128",
             )
 
-            with open(output_path, "wb") as f:
+            temp_cache = self.cache_dir / f"tmp_{cache_key}.mp3"
+            with open(temp_cache, "wb") as f:
                 for chunk in audio_stream:
                     if chunk:
                         f.write(chunk)
 
+            if temp_cache.exists() and temp_cache.stat().st_size > 500:
+                temp_cache.replace(cached_file)
+                if cached_file.resolve() != output_path.resolve():
+                    shutil.copy2(cached_file, output_path)
+            elif temp_cache.exists():
+                temp_cache.unlink(missing_ok=True)
+
         except Exception as e:
             raise RuntimeError(f"ElevenLabs TTS failed: {e}") from e
 
-        return str(output_path)
+        return str(output_path if output_path.exists() else cached_file)

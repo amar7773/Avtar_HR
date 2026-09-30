@@ -3751,3 +3751,42 @@ textarea:focus-visible {
   border-color: #38bdf8;
   transform: scale(1.05);
 }
+
+.formatted-message {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.55;
+}
+
+.formatted-heading {
+  font-weight: 700;
+  font-size: 1.02em;
+  margin-top: 6px;
+  margin-bottom: 2px;
+  color: var(--accent-2, #a198ff);
+}
+
+.formatted-bullet {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-left: 2px;
+  margin: 1px 0;
+}
+
+.formatted-bullet .bullet-point {
+  color: var(--accent-2, #a198ff);
+  font-weight: 700;
+  user-select: none;
+  font-size: 1.1em;
+  line-height: 1.35;
+}
+
+.formatted-bullet .bullet-content {
+  flex: 1;
+}
+
+.formatted-gap {
+  height: 6px;
+}

@@ -99,26 +99,53 @@ function FormattedMessage({ content }) {
   return (
     <div className="formatted-message">
       {lines.map((line, index) => {
-        const heading = line.startsWith("### ");
-        const text = heading ? line.slice(4) : line;
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return <div className="formatted-gap" key={`gap-${index}`} />;
+        }
+
+        const isHeading = trimmed.startsWith("### ") || trimmed.startsWith("## ");
+        const isBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("• ");
+
+        let text = trimmed;
+        if (isHeading) {
+          text = trimmed.replace(/^#{2,3}\s+/, "");
+        } else if (isBullet) {
+          text = trimmed.replace(/^[-*•]\s+/, "");
+        }
+
         const parts = text.split(/(\*\*[^*]+\*\*)/g);
+        const rendered = parts.map((part, partIndex) => {
+          if (part.startsWith("**") && part.endsWith("**")) {
+            return (
+              <strong key={partIndex}>
+                {part.slice(2, -2)}
+              </strong>
+            );
+          }
+          return <span key={partIndex}>{part}</span>;
+        });
+
+        if (isHeading) {
+          return (
+            <div className="formatted-heading" key={`${index}-${line}`}>
+              {rendered}
+            </div>
+          );
+        }
+
+        if (isBullet) {
+          return (
+            <div className="formatted-bullet" key={`${index}-${line}`}>
+              <span className="bullet-point">•</span>
+              <span className="bullet-content">{rendered}</span>
+            </div>
+          );
+        }
 
         return (
-          <div
-            className={heading ? "formatted-heading" : ""}
-            key={`${index}-${line}`}
-          >
-            {parts.map((part, partIndex) => {
-              if (part.startsWith("**") && part.endsWith("**")) {
-                return (
-                  <strong key={partIndex}>
-                    {part.slice(2, -2)}
-                  </strong>
-                );
-              }
-
-              return <span key={partIndex}>{part}</span>;
-            })}
+          <div className="formatted-line" key={`${index}-${line}`}>
+            {rendered}
           </div>
         );
       })}
@@ -188,6 +215,7 @@ function App() {
   const [latestAiResponse, setLatestAiResponse] = useState("");
   const activeAudioRef = useRef(null);
   const pollIntervalRef = useRef(null);
+  const [hasActiveAudio, setHasActiveAudio] = useState(false);
 
   const [voiceCompact, setVoiceCompact] = useState(false);
   const [toast, setToast] = useState("");
@@ -266,10 +294,16 @@ function App() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.image_url) {
-          setAvatarImageUrl(`${API_URL}${data.image_url}`);
+          const cleanUrl = data.image_url.trim();
+          const img = cleanUrl.startsWith("http")
+            ? cleanUrl
+            : `${API_URL}${cleanUrl.startsWith("/") ? "" : "/"}${cleanUrl}`;
+          setAvatarImageUrl(img);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        setAvatarImageUrl("/avatar-files/avtar_img.jpg");
+      });
   }, []);
 
   useEffect(() => {
@@ -447,27 +481,18 @@ function App() {
     setLoading(true);
 
     try {
-      const requestStartedAt = Date.now();
       const response = await fetch(`${API_URL}/chat`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            user_query: userText,
-            employee_id: String(
-              employee.employee_id
-            ),
-          }),
-        });
-
-      const minimumThinkingTime = 800;
-      const elapsed = Date.now() - requestStartedAt;
-      if (elapsed < minimumThinkingTime) {
-        await new Promise((resolve) => {
-          setTimeout(resolve, minimumThinkingTime - elapsed);
-        });
-      }
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_query: userText,
+          employee_id: String(
+            employee.employee_id
+          ),
+        }),
+      });
 
       let data;
 
@@ -811,13 +836,13 @@ function App() {
   };
 
   const pollAvatarVideo = (talkId) => {
-    if (!talkId || talkId === "None") return;
+    if (!talkId || talkId === "None" || talkId === "null") return;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
     }
 
     let attempts = 0;
-    const maxAttempts = 10; // 10 * 2s = 20 seconds max
+    const maxAttempts = 35; // 35 * 2s = 70 seconds max (D-ID renders in 15-30s)
 
     pollIntervalRef.current = setInterval(async () => {
       attempts += 1;
@@ -842,18 +867,28 @@ function App() {
             : `${API_URL}${statusData.video_url}`;
 
           setAvatarVideoUrl(fullVideoUrl);
-        } else if (statusData.status === "error" || statusData.status === "idle" || attempts >= maxAttempts) {
+          setAvatarState("speaking");
+        } else if (statusData.status === "error") {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
-          if (statusData.error) {
-            console.warn("Avatar video background info:", statusData.error);
-          }
+          const errDetail = statusData.error || "Avatar video generation failed.";
+          console.error("Avatar generation error:", errDetail);
+          notify(`Avatar Error: ${errDetail}`);
+          setAvatarState("idle");
+        } else if (attempts >= maxAttempts) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          console.warn("Avatar video timed out after 70 seconds");
+          notify("Avatar video generation timed out. Please try again.");
+          setAvatarState("idle");
         }
       } catch (err) {
         console.warn("Avatar status check error:", err);
         if (attempts >= maxAttempts) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
+          notify("Network error while checking avatar status.");
+          setAvatarState("idle");
         }
       }
     }, 2000);
@@ -935,6 +970,7 @@ function App() {
       activeAudioRef.current.pause();
       activeAudioRef.current = null;
     }
+    setHasActiveAudio(false);
 
     const mode = explicitMode || (activePage === "avtar" ? "avatar_mode" : "voice_mode");
 
@@ -982,36 +1018,37 @@ function App() {
         const url = `${API_URL}${data.audio_url}`;
 
         if (mode === "avatar_mode") {
-          // --- AVATAR MODE ---
-          // 1. Update live Avatar conversation dialogue
+          // --- AVATAR MODE: INSTANT RESPONSE (Zero Delay) ---
           setLatestUserText(userText);
           setLatestAiResponse(aiResponse);
 
-          // 2. Play ElevenLabs avatar voice IMMEDIATELY - Zero delay!
+          // 1. Play ElevenLabs avatar voice IMMEDIATELY
+          if (activeAudioRef.current) {
+            activeAudioRef.current.pause();
+            activeAudioRef.current = null;
+          }
           const avatarAudio = new Audio(url);
           activeAudioRef.current = avatarAudio;
           avatarAudio.playbackRate = 1.0;
+          setHasActiveAudio(true);
           setAvatarState("speaking");
+
+          // 2. Play natural talking avatar video in sync with audio
+          const vUrl = data?.avatar_video_url
+            ? (data.avatar_video_url.startsWith("http") ? data.avatar_video_url : `${API_URL}${data.avatar_video_url}`)
+            : `${API_URL}/avatar-files/response_avatar.mp4`;
+          setAvatarVideoUrl(vUrl);
+
           avatarAudio.onended = () => {
-            if (!avatarVideoUrl) {
-              setAvatarState("idle");
-            }
+            setAvatarVideoUrl(null);
+            setAvatarState("idle");
+            setHasActiveAudio(false);
             activeAudioRef.current = null;
           };
-          avatarAudio.play().catch((e) => console.warn("Avatar voice autoplay restricted:", e));
 
-          // 3. In background, check if D-ID avatar video finishes
-          if (data?.avatar_video_url) {
-            const vUrl = data.avatar_video_url.startsWith("http")
-              ? data.avatar_video_url
-              : `${API_URL}${data.avatar_video_url}`;
-            setAvatarVideoUrl(vUrl);
-          } else {
-            const talkId = data?.avatar_talk_id || data?.avatar?.talk_id;
-            if (talkId && talkId !== "None") {
-              pollAvatarVideo(talkId);
-            }
-          }
+          avatarAudio.play().catch((e) => {
+            console.warn("Avatar voice autoplay restricted:", e);
+          });
         } else {
           // --- VOICE MODE (Assistant tab) ---
           setLatestUserText(userText);
@@ -1362,6 +1399,7 @@ function App() {
             latestAiResponse={latestAiResponse}
             onVideoEnded={handleAvatarVideoEnded}
             onReplayGreeting={triggerGreeting}
+            hasActiveAudio={hasActiveAudio}
           />
         )}
 
@@ -1483,6 +1521,7 @@ function AvtarPage({
   latestAiResponse = "",
   onVideoEnded,
   onReplayGreeting,
+  hasActiveAudio = false,
 }) {
   const videoRef = useRef(null);
   const [isMuted, setIsMuted] = useState(false);
@@ -1490,8 +1529,15 @@ function AvtarPage({
   useEffect(() => {
     if (avatarVideoUrl && videoRef.current) {
       videoRef.current.currentTime = 0;
-      videoRef.current.muted = false;
-      setIsMuted(false);
+      if (hasActiveAudio) {
+        videoRef.current.muted = true;
+        videoRef.current.loop = true;
+        setIsMuted(false);
+      } else {
+        videoRef.current.muted = false;
+        videoRef.current.loop = false;
+        setIsMuted(false);
+      }
       const playPromise = videoRef.current.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
@@ -1504,7 +1550,7 @@ function AvtarPage({
         });
       }
     }
-  }, [avatarVideoUrl]);
+  }, [avatarVideoUrl, hasActiveAudio]);
 
   const handleMicClick = () => {
     if (recording) {
@@ -1624,9 +1670,11 @@ function AvtarPage({
                   src={avatarVideoUrl}
                   autoPlay
                   playsInline
+                  muted={hasActiveAudio}
+                  loop={hasActiveAudio}
                   onEnded={handleVideoEnded}
                 />
-                {isMuted && (
+                {!hasActiveAudio && isMuted && (
                   <button
                     type="button"
                     className="avatar-unmute-overlay-btn"
@@ -1650,8 +1698,8 @@ function AvtarPage({
                 src={avatarImageUrl || "/avatar-files/avtar_img.jpg"}
                 alt="Avtar - AI Employee Assistant"
                 onError={(e) => {
-                  if (!e.currentTarget.src.includes("/avatar-files/avtar_img.jpg")) {
-                    e.currentTarget.src = "/avatar-files/avtar_img.jpg";
+                  if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
+                    e.currentTarget.src = "/avtar_img.jpg";
                   }
                 }}
               />
@@ -1668,6 +1716,12 @@ function AvtarPage({
               <div className="avatar-live-indicator thinking">
                 <span className="spinner-orbit" />
                 <span className="indicator-chip">Processing...</span>
+              </div>
+            )}
+            {status.className === "preparing" && (
+              <div className="avatar-live-indicator thinking">
+                <span className="spinner-orbit" />
+                <span className="indicator-chip">Generating Lip-sync...</span>
               </div>
             )}
             {status.className === "greeting" && (
@@ -1743,17 +1797,19 @@ function AvtarPage({
                 type="button"
                 className={`avatar-mic-trigger ${status.className}`}
                 onClick={handleMicClick}
-                disabled={voiceLoading}
-                title={recording ? "Click to finish" : "Click to speak"}
+                disabled={voiceLoading || avatarState === "preparing"}
+                title={recording ? "Click to finish" : avatarState === "preparing" ? "Generating avatar video..." : "Click to speak"}
               >
                 <span className="mic-trigger-icon">
-                  {recording ? "⏹" : voiceLoading ? "⏳" : "🎙"}
+                  {recording ? "⏹" : voiceLoading || avatarState === "preparing" ? "⏳" : "🎙"}
                 </span>
                 <span className="mic-trigger-text">
                   {recording
                     ? "Finish Speaking"
                     : voiceLoading
                     ? "Thinking..."
+                    : avatarState === "preparing"
+                    ? "Generating Video..."
                     : avatarVideoUrl || avatarState === "speaking"
                     ? "Ask Another Question"
                     : "Tap to Speak"}
@@ -1764,6 +1820,8 @@ function AvtarPage({
                   ? "Tap Finish Speaking when done."
                   : voiceLoading
                   ? "Generating ElevenLabs voice..."
+                  : avatarState === "preparing"
+                  ? "Rendering lip-synced avatar video..."
                   : "Hindi, English or Hinglish — any language."}
               </span>
             </div>

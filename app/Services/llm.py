@@ -10,35 +10,65 @@ from app.Tools.employee_tools import (
     get_employee,
     get_attendance,
     get_leave_requests,
+    get_leave_balance,
     get_leave_types,
     get_holidays,
     get_employee_shift,
     get_employee_branch,
-    get_employee_designation
+    get_employee_designation,
+    format_india_datetime
 )
 
 load_dotenv()
 
 
-def detect_language_mode(query: str) -> str:
-    if re.search(r"[\u0900-\u097F]", query):
-        return "Hindi (Devanagari)"
+def detect_language_mode(query: str, hint: str = None) -> str:
+    """
+    Automatically detects the language mode:
+    - 'Hindi': Devanagari script
+    - 'Hinglish': Hindi words written in Roman/English alphabet
+    - 'English': English phrasing and vocabulary
+    """
+    if not query or not str(query).strip():
+        return "English"
 
-    hinglish_markers = {
-        "kya", "kyu", "kyun", "kaise", "kese", "kitna", "kitni", "kitne",
-        "hai", "hain", "ho", "tha", "thi", "the", "mera", "meri", "mere",
-        "mujhe", "mujhko", "apna", "apni", "apne", "humara", "humaari",
-        "batao", "bataye", "batana", "chahiye", "karo", "karna", "diya",
-        "wali", "wala", "wale", "aur", "bhi", "kab", "kahan", "kisko",
-        "chhutti", "chutti", "aaj", "kal", "parson", "pichle", "agla",
-        "agli", "ab", "haan", "nahi", "nahin", "theek", "shukriya",
-        "dhanyawad", "namaste", "pranam", "karni", "karta", "karte",
-        "raha", "rahi", "rahe", "bhejo", "dekhna", "dikhao", "mein",
-        "me", "se", "ko", "ke", "ki", "ka"
+    query_str = str(query)
+
+    # 1. Any Devanagari character (U+0900 to U+097F) -> Pure Hindi
+    if re.search(r"[\u0900-\u097F]", query_str):
+        return "Hindi"
+
+    # 2. Check for unambiguous Hinglish markers (never used in standard English)
+    unambiguous_hinglish = {
+        "kya", "kyu", "kyun", "kaise", "kese", "kaisa", "kaisi", "kitna", "kitni", "kitne",
+        "kab", "kahan", "kaha", "kidhar", "kaun", "kon", "kisko", "kisse", "kiski", "kiske",
+        "mera", "meri", "mere", "mujhe", "mujhko", "humara", "humaari", "humare",
+        "aapka", "aapki", "aapke", "tumhara", "tumhari", "tumhare", "apna", "apni", "apne",
+        "uska", "uski", "uske", "unka", "unki", "unke", "inka", "inki", "inke",
+        "hai", "hain", "hoon", "hun", "tha", "thi", "the", "hoga", "hogi", "honge",
+        "karo", "kare", "karen", "karein", "karna", "karni", "karne", "karta", "karti", "karte",
+        "karu", "karun", "kiya", "kiye", "batao", "bataiye", "bataye", "batana", "bata",
+        "chahiye", "chahta", "chahti", "chahte", "raha", "rahi", "rahe", "gaya", "gayi", "gaye",
+        "jaana", "jana", "jaaye", "jao", "aao", "aana", "aaye", "aaya", "aayi", "dekhna",
+        "dekho", "dekhe", "dekhein", "dikhao", "dikhaye", "dedo", "milega", "milegi", "milenge",
+        "sakta", "sakti", "sakte", "sakun", "bolo", "bolna", "samjhao", "samajh", "bhejo",
+        "mein", "saath", "bina", "lekin", "magar", "kyunki", "kyoki", "taki",
+        "agar", "kabhi", "nahi", "nahin", "haan", "theek", "thik", "sahi", "galat",
+        "achha", "accha", "achhi", "acchi", "aaj", "kal", "parson", "tarikh", "tareekh",
+        "mahina", "mahine", "saal", "hafta", "hafte", "chhutti", "chutti", "chhuttiyan", "chuttiyan",
+        "vetan", "tankha", "tankhah", "namaste", "pranam", "shukriya", "dhanyawad", "alvida",
+        "pichle", "agla", "agli", "wali", "wala", "wale", "kuch", "kuchh", "bohot", "bahut",
+        "jyada", "zyada", "thoda", "thodi", "sunao", "kaunsa", "kaunsi", "kaunse"
     }
-    tokens = set(re.findall(r"\b[a-zA-Z]+\b", query.casefold()))
-    if tokens & hinglish_markers:
-        return "Hinglish (Hindi written in Roman English alphabet)"
+
+    tokens = set(re.findall(r"\b[a-zA-Z]+\b", query_str.casefold()))
+    if tokens & unambiguous_hinglish:
+        return "Hinglish"
+
+    # STT hint fallback if provided
+    if hint in ("hin", "hi"):
+        return "Hinglish"
+
     return "English"
 
 
@@ -52,7 +82,7 @@ class LLMServices:
             api_key=os.getenv("GROQ_API_KEY")
         )
 
-        self.model = "openai/gpt-oss-20b"
+        self.model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
         self.tools = [
             {
@@ -130,6 +160,27 @@ class LLMServices:
                                     "Leave status such as approved, "
                                     "rejected or pending."
                                 )
+                            }
+                        },
+                        "required": ["employee_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_leave_balance",
+                    "description": (
+                        "Get an employee's personal leave balance including "
+                        "per-type breakdown (allocated, used, remaining) and "
+                        "overall total allocated, used, and remaining leaves."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "employee_id": {
+                                "type": "string",
+                                "description": "Employee ID such as EMP-0013."
                             }
                         },
                         "required": ["employee_id"]
@@ -245,6 +296,7 @@ class LLMServices:
         if employee_id and function_name in {
             "get_employee",
             "get_attendance",
+            "get_leave_balance",
             "get_leave_requests",
             "get_employee_shift",
             "get_employee_branch",
@@ -263,6 +315,11 @@ class LLMServices:
                 date=arguments.get("date"),
                 month=arguments.get("month"),
                 year=arguments.get("year")
+            )
+
+        if function_name == "get_leave_balance":
+            return get_leave_balance(
+                employee_id=arguments["employee_id"]
             )
 
         if function_name == "get_leave_requests":
@@ -302,72 +359,112 @@ class LLMServices:
         employee_id,
         result,
         conversation_history=None,
+        lang_mode=None,
     ):
-        lang_mode = detect_language_mode(user_query)
+        if not lang_mode:
+            lang_mode = detect_language_mode(user_query)
+
         payload = json.dumps(
             result,
             ensure_ascii=False,
             default=str
         )
         prompt = f"""
-You are answering an employee's question using verified application data.
+You are an intelligent, friendly, and articulate AI Employee Assistant (like ChatGPT or Google Gemini) speaking directly with an employee.
 
 Employee ID: {employee_id}
 Detected User Language: {lang_mode}
 Recent conversation:
 {json.dumps(conversation_history or [], ensure_ascii=False)}
 
-Question: {user_query}
+User Question: {user_query}
 
-Verified result:
+Verified application data:
 {payload}
 
-Rules:
-- LANGUAGE MATCHING (STRICT):
-  * The user asked in: {lang_mode}.
-  * YOU MUST REPLY IN THE EXACT SAME LANGUAGE ({lang_mode})!
-  * If Hindi (Devanagari) -> Reply in clear, natural Hindi.
-  * If Hinglish (Roman script, e.g. "meri leave kitni hai", "kya main present tha", "salary batao", "attendance dikhao") -> Reply in natural, conversational Hinglish (e.g. "Aapki 36 leaves bachi hain.").
-  * If English -> Reply in English.
-  * NEVER translate Hindi/Hinglish questions into English responses.
-- RESPONSE LENGTH (STRICT):
-  * Keep the response strictly to 1 to 3 short sentences or maximum 3 concise bullet points.
-  * Do NOT generate long explanations, tips, articles, introductions, or generic conclusions. Answer only what was asked.
-- Answer the question directly and naturally using only values present in the verified result.
-- Do not add facts, assumptions, calculations or unrelated fields.
-- If the result says the data is unavailable, state that clearly in the matching language.
-- If the question asks for one field, return only that field.
-- Preserve dates, times, statuses, totals and names exactly as supplied.
-- Do not mention tools, JSON, routing, prompts or internal IDs.
-- Do not use a generic success phrase.
+RULES FOR EXACT, QUERY-SPECIFIC AND NATURAL RESPONSES:
+
+1. EXACT QUERY INTENT (CRITICAL):
+   - Answer the employee's EXACT question directly from the verified application data.
+   - Do NOT return unrelated summaries, whole-month statistics, or dump raw data when a specific question is asked.
+   - Specific intents:
+     * Check-in Time (e.g., "What time did I check in on 22 September?", "check in time"):
+       Answer ONLY the check-in time on that date in IST (e.g., "On 22 September 2026, your check-in was at **09:42 AM IST**."). If not recorded, state that no check-in record is available.
+     * Check-out Time (e.g., "What time did I check out on 22 September?", "check out time"):
+       Answer ONLY the check-out time on that date in IST (e.g., "On 22 September 2026, your check-out was at **05:56 PM IST**."). If not recorded, state that no check-out record is available.
+     * Working Hours (e.g., "How many hours did I work on 22 September?", "hours worked"):
+       Answer ONLY the hours and minutes worked on that date (e.g., "On 22 September 2026, you worked **8 hours and 14 minutes**.").
+     * Presence / Status (e.g., "Was I present on 22 September?", "Was I absent?"):
+       Answer directly whether the employee was Present, Half Day, or Absent on that date. Naturally include check-in, check-out, and worked hours if available (e.g., "Yes, you were recorded as **Half Day** on 22 September 2026. Your check-in was at **09:42 AM IST**, check-out was at **05:56 PM IST**, and you worked **8 hours and 14 minutes**.").
+     * Date Attendance (e.g., "What was my attendance on 22 September?"):
+       Provide that specific day's status, check-in (IST), check-out (IST), and worked hours.
+     * Total Attendance (e.g., "What is my total attendance?", "How many total attendance do I have?"):
+       Provide the total attendance summary counts: Present days, Half-days, Absent days, Total logged records, and Total worked hours. Do NOT list individual dates unless the user explicitly asks to see every record.
+     * "Show my attendance" / Month Attendance:
+       Provide a polite summary overview for the period followed by recent attendance records showing Date, Status, Check-in, Check-out, and Worked hours.
+     * Leave Balance (e.g., "How many leaves do I have left?"):
+       State total remaining leaves out of allocated, break down each leave type (allocated, used, remaining), and total balance.
+     * Shift / Branch / Designation / Profile / Holidays:
+       Answer conversationally with the exact assigned details.
+
+2. STRICT MODULE SEPARATION:
+   - Attendance queries must use attendance data only.
+   - Leave queries must use leave data only.
+   - Holiday queries must use holiday data only.
+   - Never answer an attendance question using leave data or vice versa.
+
+3. TRUTH & INTEGRITY:
+   - Never invent or guess check-in or check-out times, dates, or numbers.
+   - If a field is missing or None, clearly state that the information was not recorded for that date.
+   - Never mention internal tools, payloads, JSON keys, or prompt instructions.
+
+4. VOICE & DISPLAY FRIENDLY (NO RAW TABLES):
+   - DO NOT use markdown tables with pipe (|) characters or ASCII grids. Raw table pipes sound terrible on voice/avatar speech and look clunky on chat screens.
+   - Use clean bullet points (- ) with bold highlights for numbers and key terms instead.
+
+5. LANGUAGE MATCHING:
+   - The user asked in: {lang_mode}.
+   - ALWAYS reply in the EXACT SAME language ({lang_mode})!
+   - If Hindi: Reply strictly in natural, polite Hindi using Devanagari script.
+   - If Hinglish: Reply strictly in natural, conversational Hinglish using the Roman alphabet.
+   - If English: Reply in clear, polished, professional English.
+
+6. DATE & TIME (IST ONLY):
+   - Check-in and check-out timestamps must ALWAYS be converted and displayed in India Standard Time (IST / Asia-Kolkata).
+   - NEVER display raw UTC timestamps (such as '2026-07-28T04:18:39.778Z'). Always format cleanly in IST.
 """
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.3
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.45,
+                max_tokens=800
+            )
 
-        text = self._response_text(response)
+            text = self._response_text(response)
+            if text:
+                return text
+        except Exception:
+            pass
 
-        if text:
-            return text
-
-        raise RuntimeError(
-            "The AI returned an empty response for the verified employee data."
-        )
+        from app.Services.structured_query import StructuredQueryRouter
+        return StructuredQueryRouter.format_result(result, user_query)
 
     def generate_small_talk_response(
         self,
         user_query,
         employee_id,
         conversation_history=None,
+        lang_mode=None,
     ):
+        if not lang_mode:
+            lang_mode = detect_language_mode(user_query)
 
         prompt = f"""
 You are the conversational layer of an employee assistant.
@@ -378,16 +475,15 @@ Recent conversation:
 Message: {user_query}
 
 Rules:
-- LANGUAGE MATCHING (STRICT):
-  * If the employee speaks in Hindi or Hinglish (e.g. "namaste", "kaise ho", "theek hai", "kya haal hai"), reply in friendly, natural Hindi / Hinglish.
-  * If in English, reply in English.
-- LENGTH: Keep response strictly to 1 short sentence (maximum 2).
-- Distinguish greetings, acknowledgements, agreement, and refusal:
-  * A greeting should welcome the employee and briefly offer help.
-  * An acknowledgement such as okay should acknowledge it without repeating a full welcome.
-  * Yes should acknowledge agreement and invite the next request.
-  * No should acknowledge the refusal politely and offer another option.
-- Do not claim employee data was retrieved. Do not answer an employee-data question that is not present.
+- LANGUAGE MATCHING (CRITICAL):
+  * Detected Language: {lang_mode}.
+  * YOU MUST REPLY IN THE EXACT SAME LANGUAGE ({lang_mode})!
+  * If Hindi: Reply in natural Hindi in Devanagari script (e.g. "नमस्ते! मैं आपकी किस प्रकार सहायता कर सकता हूँ?").
+  * If Hinglish: Reply in natural, friendly Hinglish in Roman English alphabet (e.g. "Namaste! Main aapki kya madad kar sakta hoon?", "Theek hai, batayein main aapki kya madad karoon?").
+  * If English: Reply in natural English (e.g. "Hello! How can I help you today?").
+- LENGTH: Exactly 1 short, polite sentence (maximum 2).
+- Distinguish greetings, acknowledgements, agreement, and refusal naturally.
+- Do not claim employee data was retrieved.
 """
 
         response = self.client.chat.completions.create(
@@ -398,15 +494,19 @@ Rules:
                     "content": prompt
                 }
             ],
-            temperature=0.5
+            temperature=0.3,
+            max_tokens=300
         )
 
         text = self._response_text(response)
 
         if not text:
-            raise RuntimeError(
-                "The AI returned an empty response for conversational input."
-            )
+            # Fallback if reasoning model didn't emit text
+            if lang_mode == "Hindi":
+                return "नमस्ते! मैं आपकी किस प्रकार सहायता कर सकता हूँ?"
+            elif lang_mode == "Hinglish":
+                return "Namaste! Main aapki kya madad kar sakta hoon?"
+            return "Hello! How can I help you today?"
 
         return text
 
@@ -549,12 +649,10 @@ Rules:
                 f"on: {early_out_dates}."
             )
 
-        lines = ["Here are your most recent attendance records:\n"]
+        lines = []
 
         if summary:
-
             month = summary.get("month", "")
-
             try:
                 month = datetime.strptime(
                     f"{month}-01",
@@ -563,14 +661,20 @@ Rules:
             except (TypeError, ValueError):
                 pass
 
-            lines.append(
-                f"For {month}: you were absent on "
-                f"{summary.get('absent', 0)} day(s). "
-                f"Late check-in lifeline used: "
-                f"{summary.get('late_check_in_lifelines', 0)} time(s). "
-                f"Late check-out lifeline used: "
-                f"{summary.get('late_check_out_lifelines', 0)} time(s).\n"
-            )
+            period_text = f" ({month})" if month else ""
+            lines.append(f"### Attendance Summary{period_text}\n")
+            lines.append(f"- **Present:** {summary.get('present', 0)} day(s)")
+            lines.append(f"- **Half-day:** {summary.get('half_day', 0)} day(s)")
+            lines.append(f"- **Absent:** {summary.get('absent', 0)} day(s)")
+            lines.append(f"- **Total Records:** {summary.get('total_records', len(records))} day(s)")
+            if summary.get("total_worked_hours") is not None:
+                lines.append(
+                    f"- **Total Working Time:** {summary.get('total_worked_hours', 0)} hour(s) and "
+                    f"{summary.get('remaining_worked_minutes', 0)} minute(s)"
+                )
+            lines.append("")
+
+        lines.append("### Recent Attendance Records\n")
 
         for record in records:
 
@@ -634,15 +738,27 @@ Rules:
 
     @staticmethod
     def _attendance_time(value):
+        if not value:
+            return ""
 
         try:
             return datetime.strptime(
-                value,
+                str(value),
                 "%Y-%m-%d %I:%M %p IST"
             ).strftime("%I:%M %p IST")
-
         except (TypeError, ValueError):
-            return value
+            pass
+
+        formatted = format_india_datetime(value)
+        if formatted:
+            try:
+                return datetime.strptime(
+                    formatted,
+                    "%Y-%m-%d %I:%M %p IST"
+                ).strftime("%I:%M %p IST")
+            except Exception:
+                return formatted
+        return str(value)
 
     @staticmethod
     def _format_summary_date(value):
@@ -777,9 +893,11 @@ Rules:
         employee_id=None,
         user_query=None,
         conversation_history=None,
+        lang_mode=None,
     ):
+        if not lang_mode:
+            lang_mode = detect_language_mode(query)
 
-        lang_mode = detect_language_mode(query)
         current_india_time = datetime.now(
             self.INDIA_TIMEZONE
         ).strftime("%Y-%m-%d %I:%M %p IST")
@@ -793,14 +911,20 @@ YOU MUST REPLY IN: {lang_mode}
 
 LANGUAGE MATCHING (CRITICAL):
 - ALWAYS reply in the EXACT SAME language the employee used ({lang_mode}):
-  * If Hindi: reply in natural Hindi.
-  * If Hinglish: reply in natural conversational Hinglish.
-  * If English: reply in English.
+  * If Hindi: reply strictly in natural Hindi (Devanagari script only).
+  * If Hinglish: reply strictly in natural conversational Hinglish (Roman English alphabet only, e.g. "Aap portal par jakar apply kar sakte hain.").
+  * If English: reply in clear English.
 - Never translate Hindi or Hinglish questions into English responses.
 
-RESPONSE LENGTH & FORMAT (CRITICAL):
-- Keep responses SHORT, direct, and conversational: 1 to 3 short sentences or maximum 3 concise bullet points.
-- Do NOT generate long articles, introductions, tips, conclusions, or essays. Answer only what was asked.
+RESPONSE STYLE & FORMAT (CRITICAL):
+- Speak like a friendly, intelligent, articulate HR AI assistant (like ChatGPT).
+- Answer single-fact questions (designation, shift, branch, check-in time) in complete, natural, polite conversational sentences, NOT raw key-value headers.
+- For attendance queries: provide a conversational summary (Present, Half-day, Absent, total records, worked hours) followed by recent records with check-in and check-out times in IST.
+- For leave balance queries: state the total remaining leaves and show each leave type separately with allocated, used, and remaining days.
+- For timestamps: ALWAYS display check-in and check-out times in India Standard Time (IST / Asia-Kolkata). Never display raw UTC timestamps.
+- Use clean bullet points (- ) with bold highlights instead of markdown tables with pipe (|) characters.
+- Do not unnecessarily compress multiple records into a single confusing sentence.
+- Do not generate long articles, introductions, tips, conclusions, or essays. Answer what was asked in a helpful, conversational manner.
 - For leave process (e.g. "leaves kaise apply karte hain?"): give only the actual, concise steps from Company Context.
 
 EMPLOYEE AND COMPANY QUESTIONS:
@@ -809,6 +933,7 @@ EMPLOYEE AND COMPANY QUESTIONS:
 - Never invent employee data or company policies.
 - Always use the employee_id provided by the application ({employee_id}). Never ask the user for their employee ID.
 - For attendance use get_attendance.
+- For leave balance / remaining leaves use get_leave_balance.
 - For leave requests use get_leave_requests.
 - For leave policy use get_leave_types.
 - For holidays use get_holidays.
@@ -864,7 +989,8 @@ Current date and time in India:
                 model=self.model,
                 messages=messages,
                 tools=self.tools,
-                temperature=0.2
+                temperature=0.45,
+                max_tokens=800
             )
 
             message = response.choices[0].message
@@ -934,10 +1060,21 @@ Current date and time in India:
                     )
                 })
 
-        fallback = (
-            "I couldn't find reliable information to answer that question. "
-            "Please ask about your employee data or company information."
-        )
+        if lang_mode == "Hindi":
+            fallback = (
+                "मुझे इस बारे में पूरी जानकारी नहीं मिल पाई। "
+                "कृपया अपने एम्प्लॉई डेटा या कंपनी पॉलिसी के बारे में पूछें।"
+            )
+        elif lang_mode == "Hinglish":
+            fallback = (
+                "Mujhe is baare mein sahi jaankari nahi mil paayi. "
+                "Kripya apne employee data ya company policy ke baare mein poochein."
+            )
+        else:
+            fallback = (
+                "I couldn't find reliable information to answer that question. "
+                "Please ask about your employee data or company information."
+            )
 
         return {
             "type": "message",

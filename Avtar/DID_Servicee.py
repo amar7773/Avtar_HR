@@ -16,11 +16,12 @@ class DIDService:
         self.headers = {"Authorization": f"Basic {self.api_key}"}
 
     def upload_audio(self, audio_path):
+        filename = os.path.basename(audio_path)
         with open(audio_path, "rb") as audio_file:
             response = requests.post(
                 f"{self.base_url}/audios",
                 headers=self.headers,
-                files={"audio": audio_file},
+                files={"audio": (filename, audio_file, "audio/mpeg")},
                 timeout=60,
             )
         if response.status_code != 201:
@@ -31,11 +32,19 @@ class DIDService:
     def create_talking_avatar(self, image_url, audio_url):
         payload = {
             "source_url": image_url,
-            "script": {"type": "audio", "audio_url": audio_url},
+            "script": {
+                "type": "audio",
+                "audio_url": audio_url,
+            },
             "config": {
                 "stitch": True,
                 "fluent": True,
                 "pad_audio": 0.0,
+                "align_driver": True,
+                "auto_match": True,
+                "motion_factor": 1.0,
+                "normalization_factor": 1.0,
+                "sharpen": True,
             },
         }
         response = requests.post(
@@ -53,37 +62,58 @@ class DIDService:
     @staticmethod
     def composite_full_avatar(face_video_path, output_video_path, source_img_path=None, original_audio_path=None):
         import subprocess
+        import shutil
         if not source_img_path:
             source_img_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
                 "avtar_img.jpg"
             )
-        if not os.path.exists(source_img_path) or not os.path.exists(face_video_path):
+        if not os.path.exists(face_video_path):
             return face_video_path
 
-        if original_audio_path and os.path.exists(original_audio_path):
-            cmd = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", source_img_path,
-                "-i", face_video_path,
-                "-i", original_audio_path,
-                "-filter_complex", "[1:v]scale=1142:1142[face];[0:v][face]overlay=920:114:shortest=1[outv]",
-                "-map", "[outv]", "-map", "2:a",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-shortest",
-                output_video_path
+        # Check if the D-ID output video is already full-frame (stitched)
+        is_full_frame = False
+        try:
+            cmd_probe = [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0",
+                face_video_path
             ]
-        else:
-            cmd = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", source_img_path,
-                "-i", face_video_path,
-                "-filter_complex", "[1:v]scale=1142:1142[face];[0:v][face]overlay=920:114:shortest=1[outv]",
-                "-map", "[outv]", "-map", "1:a",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-shortest",
-                output_video_path
-            ]
+            res = subprocess.run(cmd_probe, capture_output=True, text=True, check=True)
+            dims = res.stdout.strip().replace("x", " ").split()
+            if len(dims) >= 2:
+                vw = int(dims[0])
+                vh = int(dims[1])
+                # D-ID with stitch=True scales to 1280x854 (aspect ratio 1.5) or full frame
+                if vw >= 1000 or (vw != vh and vw > 600) or abs(vw / vh - 1.5) < 0.2:
+                    is_full_frame = True
+        except Exception as probe_err:
+            print(f"[AVATAR INFO] Dimension probe info: {probe_err}")
+            # If probe fails, D-ID requested with stitch=True is full-frame
+            is_full_frame = True
+
+        # If already full-frame or source image missing, preserve the video with its exact synced audio
+        if is_full_frame or not os.path.exists(source_img_path):
+            try:
+                if os.path.abspath(face_video_path) != os.path.abspath(output_video_path):
+                    shutil.copy2(face_video_path, output_video_path)
+                return output_video_path
+            except Exception:
+                return face_video_path
+
+        # If cropped face (e.g. 512x512), composite onto full frame preserving D-ID's exact synced audio (1:a)
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", source_img_path,
+            "-i", face_video_path,
+            "-filter_complex", "[1:v]scale=1142:1142[face];[0:v][face]overlay=920:114:shortest=1[outv]",
+            "-map", "[outv]", "-map", "1:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest",
+            output_video_path
+        ]
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return output_video_path
