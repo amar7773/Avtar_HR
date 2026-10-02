@@ -15,6 +15,26 @@ class DIDService:
         self.base_url = "https://api.d-id.com"
         self.headers = {"Authorization": f"Basic {self.api_key}"}
 
+    def upload_image(self, image_path):
+        """Upload a local image file to D-ID /images and return image_id + image_url."""
+        import mimetypes
+        filename = os.path.basename(image_path)
+        mime_type = mimetypes.guess_type(filename)[0] or "image/jpeg"
+        with open(image_path, "rb") as img_file:
+            response = requests.post(
+                f"{self.base_url}/images",
+                headers=self.headers,
+                files={"image": (filename, img_file, mime_type)},
+                timeout=60,
+            )
+        if response.status_code not in (200, 201):
+            raise RuntimeError(f"Image upload to D-ID failed: {response.text}")
+        data = response.json()
+        return {
+            "image_id": data.get("id"),
+            "image_url": data.get("url"),
+        }
+
     def upload_audio(self, audio_path):
         filename = os.path.basename(audio_path)
         with open(audio_path, "rb") as audio_file:
@@ -29,23 +49,33 @@ class DIDService:
         data = response.json()
         return {"url": data["url"]}
 
-    def create_talking_avatar(self, image_url, audio_url):
+    def create_talking_avatar(self, image_url, audio_url, expression="neutral"):
+        valid_expressions = ("neutral", "happy", "serious", "surprise")
+        chosen_expression = expression if expression in valid_expressions else "neutral"
+
+        config = {
+            "stitch": True,
+            "fluent": True,
+            "pad_audio": 0.0,
+            "driver_expressions": {
+                "expressions": [
+                    {
+                        "start_frame": 0,
+                        "expression": chosen_expression,
+                        "intensity": 0.85,
+                    }
+                ],
+                "transition_frames": 20,
+            },
+        }
+
         payload = {
             "source_url": image_url,
             "script": {
                 "type": "audio",
                 "audio_url": audio_url,
             },
-            "config": {
-                "stitch": True,
-                "fluent": True,
-                "pad_audio": 0.0,
-                "align_driver": True,
-                "auto_match": True,
-                "motion_factor": 1.0,
-                "normalization_factor": 1.0,
-                "sharpen": True,
-            },
+            "config": config,
         }
         response = requests.post(
             f"{self.base_url}/talks",
@@ -94,31 +124,14 @@ class DIDService:
             # If probe fails, D-ID requested with stitch=True is full-frame
             is_full_frame = True
 
-        # If already full-frame or source image missing, preserve the video with its exact synced audio
-        if is_full_frame or not os.path.exists(source_img_path):
-            try:
-                if os.path.abspath(face_video_path) != os.path.abspath(output_video_path):
-                    shutil.copy2(face_video_path, output_video_path)
-                return output_video_path
-            except Exception:
-                return face_video_path
-
-        # If cropped face (e.g. 512x512), composite onto full frame preserving D-ID's exact synced audio (1:a)
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", source_img_path,
-            "-i", face_video_path,
-            "-filter_complex", "[1:v]scale=1142:1142[face];[0:v][face]overlay=920:114:shortest=1[outv]",
-            "-map", "[outv]", "-map", "1:a",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest",
-            output_video_path
-        ]
+        # D-ID with stitch=True natively generates the seamless stitched video.
+        # Preserve D-ID's native output directly to guarantee natural lip-sync, expression and facial integrity.
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            if os.path.abspath(face_video_path) != os.path.abspath(output_video_path):
+                shutil.copy2(face_video_path, output_video_path)
             return output_video_path
         except Exception as e:
-            print(f"[AVATAR WARNING] FFmpeg compositing failed: {e}")
+            print(f"[AVATAR WARNING] Video copy fallback: {e}")
             return face_video_path
     def get_talk_status(self, talk_id):
         response = requests.get(
@@ -140,11 +153,12 @@ class DIDService:
             "data": data,
         }
 
-    def start_talking_avatar_from_audio(self, image_url, audio_path):
+    def start_talking_avatar_from_audio(self, image_url, audio_path, expression="neutral"):
         audio_url = self.upload_audio(audio_path)["url"]
         talk_id = self.create_talking_avatar(
             image_url=image_url,
-            audio_url=audio_url
+            audio_url=audio_url,
+            expression=expression,
         )
         return {
             "talk_id": talk_id,
@@ -157,13 +171,10 @@ class DIDService:
         while time.time() - start_time < timeout:
             data_info = self.get_talk_status(talk_id)
             status = data_info.get("status")
-            print("🎭 D-ID Avatar Status:", status)
-            print("🎭 D-ID Response:", data_info.get("data"))
 
             if status == "done":
                 result_url = data_info.get("result_url")
                 if result_url:
-                    print("🎬 Avatar Video URL:", result_url)
                     return result_url
                 raise RuntimeError(
                     f"D-ID completed but no result_url was returned. "

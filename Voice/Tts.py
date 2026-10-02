@@ -28,11 +28,7 @@ class TTSService:
         self.cache_dir = Path(__file__).resolve().parent / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate_speech(
-        self,
-        text,
-        output_file="Voice/ai_response.mp3"
-    ):
+    def generate_speech(self, text, output_file="Voice/ai_response.mp3"):
         import hashlib
         import shutil
 
@@ -55,9 +51,6 @@ class TTSService:
                 return str(output_path)
             except Exception:
                 return str(cached_file)
-
-        print(f"TTS voice: {self.voice_id} (generating new audio)")
-        print(f"TTS output: {output_file}")
 
         try:
             audio_stream = self.client.text_to_speech.convert(

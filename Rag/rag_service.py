@@ -6,66 +6,38 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from Rag.vectore_store import VectorStore
 
-class RAGSerivce:
+
+class RAGService:
     def __init__(self):
         self.model = None
-        self.vectore_store = VectorStore()
+        self.vector_store = VectorStore()
 
     def _get_model(self):
         if self.model is None:
             from sentence_transformers import SentenceTransformer
-
             try:
                 self.model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
             except Exception:
                 self.model = SentenceTransformer("all-MiniLM-L6-v2")
         return self.model
 
-    def retrive(self,query,top_k=3):
-        query_embedding=self._get_model().encode(query)
-        results=self.vectore_store.search(
-            query_embedding,
-            top_k=top_k
-        )
-        retrieved_documents = []
+    def retrieve(self, query, top_k=3):
+        query_embedding = self._get_model().encode(query)
+        results = self.vector_store.search(query_embedding, top_k=top_k)
+
         documents = results.get("documents", [[]])[0]
         metadatas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]
 
-        for i,document in enumerate(documents):
-            retrieved_documents.append({
-                "text":document,
-                "source":metadatas[i]["source"],
-                "distance":distances[i]
-            })
-        return retrieved_documents
-    def get_context(self,query,top_k=3):
-        results=self.retrive(
-            query,top_k
-        )
-        context="\n\n".join(result["text"] for result in results)
-        return context
-if __name__=="__main__":
-    rag=RAGSerivce()
-    query = "How can I apply for leave?"
-    results = rag.retrive(
-        query,
-        top_k=3
-    )
-    print("\nQuery:")
-    print(query)
-    print("\nRetrieved Results:")
-    for i, result in enumerate(
-        results,
-        start=1
-    ):
-        print(f"\n--- Result {i} ---")
-        print("Source:", result["source"])
-        print("Distance:", result["distance"])
-        print("Text:", result["text"])
-    print("\n========== CONTEXT ==========")
-    context = rag.get_context(
-        query,
-        top_k=3
-    )
-    print(context)
+        return [
+            {
+                "text": doc,
+                "source": metadatas[i]["source"],
+                "distance": distances[i],
+            }
+            for i, doc in enumerate(documents)
+        ]
+
+    def get_context(self, query, top_k=3):
+        results = self.retrieve(query, top_k)
+        return "\n\n".join(result["text"] for result in results)

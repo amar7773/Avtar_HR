@@ -9,7 +9,7 @@ INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 # ==========================================
-# Helper
+# Helper functions
 # ==========================================
 
 def clean_value(value):
@@ -26,9 +26,9 @@ def clean_value(value):
         pass
 
     try:
-        if value != value:  # NaN
+        if value != value:  # NaN check
             return None
-    except:
+    except Exception:
         pass
 
     return value
@@ -40,9 +40,7 @@ def format_india_datetime(value):
         return None
 
     try:
-        parsed = datetime.fromisoformat(
-            str(value).replace("Z", "+00:00")
-        )
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=INDIA_TIMEZONE)
         india_time = parsed.astimezone(INDIA_TIMEZONE)
@@ -80,161 +78,108 @@ def get_employee(employee_id):
     result = data_service.get_employee(employee_id)
 
     if result.empty:
-        return {
-            "success": False,
-            "message": "Employee not found."
-        }
+        return {"success": False, "message": "Employee not found."}
 
     employee = result.iloc[0]
 
-    designation = data_service.get_employee_designation(
-        employee_id
-    )
-
-    branch = data_service.get_employee_branch(
-        employee_id
-    )
-
-    shift = data_service.get_employee_shift(
-        employee_id
-    )
+    designation = data_service.get_employee_designation(employee_id)
+    branch = data_service.get_employee_branch(employee_id)
+    shift = data_service.get_employee_shift(employee_id)
 
     employee_data = {
         "employee_id": clean_value(employee["employeeId"]),
         "name": f"{employee['firstName']} {employee['lastName']}",
         "job_type": clean_value(employee["jobType"]),
         "joining_date": date_only_value(employee["dateOfJoining"]),
-        "employment_status": clean_value(
-            employee["employmentStatus"]
-        ),
-        "status": clean_value(employee["status"])
+        "employment_status": clean_value(employee["employmentStatus"]),
+        "status": clean_value(employee["status"]),
     }
 
     if not designation.empty:
-        employee_data["designation"] = clean_value(
-            designation.iloc[0]["name"]
-        )
+        employee_data["designation"] = clean_value(designation.iloc[0]["name"])
 
     if not branch.empty:
-        employee_data["branch"] = clean_value(
-            branch.iloc[0]["name"]
-        )
+        employee_data["branch"] = clean_value(branch.iloc[0]["name"])
 
     if not shift.empty:
-        employee_data["shift"] = clean_value(
-            shift.iloc[0]["shiftName"]
-        )
+        employee_data["shift"] = clean_value(shift.iloc[0]["shiftName"])
+        employee_data["shift_start"] = clean_value(shift.iloc[0]["startTime"])
+        employee_data["shift_end"] = clean_value(shift.iloc[0]["endTime"])
 
-        employee_data["shift_start"] = clean_value(
-            shift.iloc[0]["startTime"]
-        )
-
-        employee_data["shift_end"] = clean_value(
-            shift.iloc[0]["endTime"]
-        )
-
-    return {
-        "success": True,
-        "employee": employee_data
-    }
-
-
-EMPLOYEE_TOOL = {
-    "type": "function",
-    "name": "get_employee",
-    "description": "Get an employee's profile, designation, branch, shift and employment information.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string",
-                "description": "Employee ID such as EMP-0013"
-            }
-        },
-        "required": ["employee_id"]
-    }
-}
+    return {"success": True, "employee": employee_data}
 
 
 # ==========================================
 # 2. Attendance
 # ==========================================
 
-def get_attendance(
-    employee_id,
-    date=None,
-    month=None,
-    year=None
-):
+def get_attendance(employee_id, date=None, month=None, year=None):
 
     result = data_service.get_attendance(
         employee_id=employee_id,
         date=date,
         month=month,
-        year=year
+        year=year,
     )
 
     if result.empty:
         return {
             "success": True,
             "message": "No attendance records found.",
-            "records": []
+            "records": [],
         }
 
     result = result.sort_values("dateKey", ascending=False)
     total_records = len(result)
+
+    # Determine the summary period
     summary_result = result
     summary_prefix = str(result.iloc[0].get("dateKey"))[:7]
     if not (month and year):
         summary_result = result[
             result["dateKey"].astype(str).str.startswith(summary_prefix)
         ]
+
     summary_status = summary_result["status"].astype(str).str.lower()
     worked_minutes = summary_result["workedMinutes"].fillna(0)
     total_worked_minutes = int(worked_minutes.sum())
     total_worked_hours = total_worked_minutes // 60
     remaining_worked_minutes = total_worked_minutes % 60
+
     lifelines = [
         marker
         for value in summary_result["lifelineApplied"]
         for marker in lifeline_markers(value)
     ]
+
     absent_dates = summary_result.loc[
         summary_status == "absent", "dateKey"
     ].astype(str).tolist()
+
     half_day_dates = summary_result.loc[
         summary_status == "half_day", "dateKey"
     ].astype(str).tolist()
+
     present_dates = summary_result.loc[
         summary_status == "present", "dateKey"
     ].astype(str).tolist()
-    lifeline_dates = {
-        "late_check_in": [],
-        "early_checkout": []
-    }
+
+    lifeline_dates = {"late_check_in": [], "early_checkout": []}
     for _, row in summary_result.iterrows():
         for marker in lifeline_markers(row.get("lifelineApplied")):
             if marker in lifeline_dates:
                 lifeline_dates[marker].append(str(row.get("dateKey")))
-    result = result.head(10)
+
     records = []
-
-    for _, row in result.iterrows():
-
+    for _, row in result.head(10).iterrows():
         records.append({
             "date": clean_value(row.get("dateKey")),
             "check_in": format_india_datetime(row.get("checkInAt")),
             "check_out": format_india_datetime(row.get("checkOutAt")),
-            "worked_minutes": clean_value(
-                row.get("workedMinutes")
-            ),
-            "status": str(clean_value(row.get("status")) or "").replace(
-                "_", " "
-            ).title(),
+            "worked_minutes": clean_value(row.get("workedMinutes")),
+            "status": str(clean_value(row.get("status")) or "").replace("_", " ").title(),
             "is_late": clean_value(row.get("isLate")),
-            "late_by_minutes": clean_value(
-                row.get("lateByMinutes")
-            )
+            "late_by_minutes": clean_value(row.get("lateByMinutes")),
         })
 
     return {
@@ -258,98 +203,53 @@ def get_attendance(
             "half_day_dates": half_day_dates,
             "present_dates": present_dates,
             "late_check_in_dates": lifeline_dates["late_check_in"],
-            "early_checkout_dates": lifeline_dates["early_checkout"]
+            "early_checkout_dates": lifeline_dates["early_checkout"],
         },
-        "records": records
+        "records": records,
     }
-
-
-ATTENDANCE_TOOL = {
-    "type": "function",
-    "name": "get_attendance",
-    "description": "Get an employee's attendance records. Can filter by date, month and year.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string",
-                "description": "Employee ID such as EMP-0013"
-            },
-            "date": {
-                "type": ["string", "null"],
-                "description": "Specific date in YYYY-MM-DD format"
-            },
-            "month": {
-                "type": ["integer", "null"],
-                "description": "Month number"
-            },
-            "year": {
-                "type": ["integer", "null"],
-                "description": "Year"
-            }
-        },
-        "required": [
-            "employee_id",
-            "date",
-            "month",
-            "year"
-        ]
-    }
-}
 
 
 # ==========================================
 # 3. Leave Requests
 # ==========================================
 
-def get_leave_requests(
-    employee_id,
-    status=None
-):
+def get_leave_requests(employee_id, status=None):
 
     result = data_service.get_leave_requests(
         employee_id=employee_id,
-        status=status
+        status=status,
     )
 
     if result.empty:
         return {
             "success": True,
             "message": "No leave requests found.",
-            "records": []
+            "records": [],
         }
 
     records = []
-
     for _, row in result.iterrows():
-
         records.append({
             "from_date": clean_value(row.get("fromDate")),
             "to_date": clean_value(row.get("toDate")),
             "days": clean_value(row.get("days")),
             "reason": clean_value(row.get("reason")),
             "status": clean_value(row.get("status")),
-            "is_half_day": clean_value(
-                row.get("isHalfDay")
-            ),
-            "half_day_session": clean_value(
-                row.get("halfDaySession")
-            )
+            "is_half_day": clean_value(row.get("isHalfDay")),
+            "half_day_session": clean_value(row.get("halfDaySession")),
         })
 
-    return {
-        "success": True,
-        "records": records
-    }
+    return {"success": True, "records": records}
 
 
 def get_leave_balance(employee_id):
     leave_types = data_service.get_leave_types()
     requests = data_service.get_leave_requests(employee_id)
+
     if leave_types.empty:
         return {
             "success": False,
-            "message": "Leave entitlement data is not available."
+            "message": "Leave entitlement data is not available.",
         }
 
     approved = (
@@ -388,87 +288,54 @@ def get_leave_balance(employee_id):
 
     total_remaining = max(total_allocated - total_used, 0.0)
 
-    values = {
+    def _to_int_if_whole(v):
+        return int(v) if float(v).is_integer() else v
+
+    return {
+        "success": True,
         "leave_types": breakdown,
-        "total_allocated": int(total_allocated) if total_allocated.is_integer() else total_allocated,
-        "total_used": int(total_used) if total_used.is_integer() else total_used,
-        "total_remaining": int(total_remaining) if total_remaining.is_integer() else total_remaining,
-        "remaining_leaves": int(total_remaining) if total_remaining.is_integer() else total_remaining,
-        "allocated_leaves": int(total_allocated) if total_allocated.is_integer() else total_allocated,
-        "used_leaves": int(total_used) if total_used.is_integer() else total_used,
+        "total_allocated": _to_int_if_whole(total_allocated),
+        "total_used": _to_int_if_whole(total_used),
+        "total_remaining": _to_int_if_whole(total_remaining),
+        "remaining_leaves": _to_int_if_whole(total_remaining),
+        "allocated_leaves": _to_int_if_whole(total_allocated),
+        "used_leaves": _to_int_if_whole(total_used),
     }
-    return {"success": True, **values}
 
 
 def get_lifeline_balance(employee_id, month=None, year=None):
-    attendance = get_attendance(
-        employee_id,
-        month=month,
-        year=year,
-    )
+    attendance = get_attendance(employee_id, month=month, year=year)
+
     if not attendance.get("records"):
         return {
             "success": False,
-            "message": "No attendance data is available for lifeline calculation."
+            "message": "No attendance data is available for lifeline calculation.",
         }
 
     shift = data_service.get_employee_shift(employee_id)
     if shift.empty:
         return {
             "success": False,
-            "message": "Shift limits are not available for lifeline calculation."
+            "message": "Shift limits are not available for lifeline calculation.",
         }
 
     row = shift.iloc[0]
     late_limit = float(row.get("lateCheckInLifelinesPerMonth") or 0)
     early_limit = float(row.get("earlyCheckoutLifelinesPerMonth") or 0)
     summary = attendance.get("summary", {})
-    late_remaining = max(
-        late_limit - summary.get("late_check_in_lifelines", 0),
-        0,
-    )
-    early_remaining = max(
-        early_limit - summary.get("late_check_out_lifelines", 0),
-        0,
-    )
+
+    late_remaining = max(late_limit - summary.get("late_check_in_lifelines", 0), 0)
+    early_remaining = max(early_limit - summary.get("late_check_out_lifelines", 0), 0)
+
+    def _to_int_if_whole(v):
+        return int(v) if float(v).is_integer() else v
+
     return {
         "success": True,
-        "late_check_in_remaining": (
-            int(late_remaining)
-            if late_remaining.is_integer()
-            else late_remaining
-        ),
-        "early_checkout_remaining": (
-            int(early_remaining)
-            if early_remaining.is_integer()
-            else early_remaining
-        ),
+        "late_check_in_remaining": _to_int_if_whole(late_remaining),
+        "early_checkout_remaining": _to_int_if_whole(early_remaining),
         "period": attendance.get("summary", {}).get("month"),
     }
-
-
-LEAVE_REQUEST_TOOL = {
-    "type": "function",
-    "name": "get_leave_requests",
-    "description": "Get an employee's valid leave requests.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string",
-                "description": "Employee ID such as EMP-0013"
-            },
-            "status": {
-                "type": ["string", "null"],
-                "description": "approved, rejected, pending or cancelled"
-            }
-        },
-        "required": [
-            "employee_id",
-            "status"
-        ]
-    }
-}
 
 
 # ==========================================
@@ -478,104 +345,40 @@ LEAVE_REQUEST_TOOL = {
 def get_leave_types():
 
     result = data_service.get_leave_types()
-
     records = []
 
     for _, row in result.iterrows():
-
         records.append({
             "name": clean_value(row.get("name")),
             "code": clean_value(row.get("code")),
-            "days_per_year": clean_value(
-                row.get("daysPerYear")
-            ),
-            "is_paid": clean_value(
-                row.get("isPaid")
-            ),
-            "carry_forward": clean_value(
-                row.get("carryForward")
-            ),
-            "allow_half_day": clean_value(
-                row.get("allowHalfDay")
-            ),
-            "requires_approval": clean_value(
-                row.get("requiresApproval")
-            )
+            "days_per_year": clean_value(row.get("daysPerYear")),
+            "is_paid": clean_value(row.get("isPaid")),
+            "carry_forward": clean_value(row.get("carryForward")),
+            "allow_half_day": clean_value(row.get("allowHalfDay")),
+            "requires_approval": clean_value(row.get("requiresApproval")),
         })
 
-    return {
-        "success": True,
-        "leave_types": records
-    }
-
-
-LEAVE_TYPES_TOOL = {
-    "type": "function",
-    "name": "get_leave_types",
-    "description": "Get active company leave types and leave policies.",
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
+    return {"success": True, "leave_types": records}
 
 
 # ==========================================
 # 5. Company Holidays
 # ==========================================
 
-def get_holidays(
-    year=None,
-    month=None
-):
+def get_holidays(year=None, month=None):
 
-    result = data_service.get_holidays(
-        year=year,
-        month=month
-    )
-
+    result = data_service.get_holidays(year=year, month=month)
     records = []
 
     for _, row in result.iterrows():
-
         records.append({
             "name": clean_value(row.get("name")),
             "date": clean_value(row.get("date")),
             "type": clean_value(row.get("type")),
-            "description": clean_value(
-                row.get("description")
-            )
+            "description": clean_value(row.get("description")),
         })
 
-    return {
-        "success": True,
-        "holidays": records
-    }
-
-
-HOLIDAY_TOOL = {
-    "type": "function",
-    "name": "get_holidays",
-    "description": "Get active company holidays by year or month.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "year": {
-                "type": ["integer", "null"],
-                "description": "Year such as 2026"
-            },
-            "month": {
-                "type": ["integer", "null"],
-                "description": "Month number"
-            }
-        },
-        "required": [
-            "year",
-            "month"
-        ]
-    }
-}
+    return {"success": True, "holidays": records}
 
 
 # ==========================================
@@ -584,54 +387,23 @@ HOLIDAY_TOOL = {
 
 def get_employee_shift(employee_id):
 
-    result = data_service.get_employee_shift(
-        employee_id
-    )
+    result = data_service.get_employee_shift(employee_id)
 
     if result.empty:
-        return {
-            "success": False,
-            "message": "Shift information not found."
-        }
+        return {"success": False, "message": "Shift information not found."}
 
     shift = result.iloc[0]
 
     return {
         "success": True,
         "shift": {
-            "name": clean_value(
-                shift.get("shiftName")
-            ),
-            "start_time": clean_value(
-                shift.get("startTime")
-            ),
-            "end_time": clean_value(
-                shift.get("endTime")
-            ),
-            "grace_period_minutes": clean_value(
-                shift.get("gracePeriodMinutes")
-            ),
-            "working_days": clean_value(
-                shift.get("workingDays")
-            )
-        }
-    }
-
-
-SHIFT_TOOL = {
-    "type": "function",
-    "name": "get_employee_shift",
-    "description": "Get an employee's assigned shift and working hours.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string"
-            }
+            "name": clean_value(shift.get("shiftName")),
+            "start_time": clean_value(shift.get("startTime")),
+            "end_time": clean_value(shift.get("endTime")),
+            "grace_period_minutes": clean_value(shift.get("gracePeriodMinutes")),
+            "working_days": clean_value(shift.get("workingDays")),
         },
-        "required": ["employee_id"]
     }
-}
 
 
 # ==========================================
@@ -640,51 +412,22 @@ SHIFT_TOOL = {
 
 def get_employee_branch(employee_id):
 
-    result = data_service.get_employee_branch(
-        employee_id
-    )
+    result = data_service.get_employee_branch(employee_id)
 
     if result.empty:
-        return {
-            "success": False,
-            "message": "Branch information not found."
-        }
+        return {"success": False, "message": "Branch information not found."}
 
     branch = result.iloc[0]
 
     return {
         "success": True,
         "branch": {
-            "name": clean_value(
-                branch.get("name")
-            ),
-            "city": clean_value(
-                branch.get("address.city")
-            ),
-            "state": clean_value(
-                branch.get("address.state")
-            ),
-            "country": clean_value(
-                branch.get("address.country")
-            )
-        }
-    }
-
-
-BRANCH_TOOL = {
-    "type": "function",
-    "name": "get_employee_branch",
-    "description": "Get an employee's assigned branch.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string"
-            }
+            "name": clean_value(branch.get("name")),
+            "city": clean_value(branch.get("address.city")),
+            "state": clean_value(branch.get("address.state")),
+            "country": clean_value(branch.get("address.country")),
         },
-        "required": ["employee_id"]
     }
-}
 
 
 # ==========================================
@@ -693,51 +436,20 @@ BRANCH_TOOL = {
 
 def get_employee_designation(employee_id):
 
-    result = data_service.get_employee_designation(
-        employee_id
-    )
+    result = data_service.get_employee_designation(employee_id)
 
     if result.empty:
-        return {
-            "success": False,
-            "message": "Designation information not found."
-        }
+        return {"success": False, "message": "Designation information not found."}
 
     designation = result.iloc[0]
 
     return {
         "success": True,
         "designation": {
-            "name": clean_value(
-                designation.get("name")
-            ),
-            "code": clean_value(
-                designation.get("code")
-            ),
-            "job_type": clean_value(
-                designation.get("defaultJobType")
-            ),
-            "level": clean_value(
-                designation.get("level")
-            ),
-            "portal_access": clean_value(
-                designation.get("portalAccessEnabled")
-            )
-        }
-    }
-
-
-DESIGNATION_TOOL = {
-    "type": "function",
-    "name": "get_employee_designation",
-    "description": "Get an employee's designation information.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "employee_id": {
-                "type": "string"
-            }
+            "name": clean_value(designation.get("name")),
+            "code": clean_value(designation.get("code")),
+            "job_type": clean_value(designation.get("defaultJobType")),
+            "level": clean_value(designation.get("level")),
+            "portal_access": clean_value(designation.get("portalAccessEnabled")),
         },
-        "required": ["employee_id"]
     }
-}

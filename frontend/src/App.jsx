@@ -216,6 +216,54 @@ function App() {
   const activeAudioRef = useRef(null);
   const pollIntervalRef = useRef(null);
   const [hasActiveAudio, setHasActiveAudio] = useState(false);
+  // Imperative refs for the avatar <video> element and pending D-ID talk.
+  const avatarVideoRef = useRef(null);
+  const pendingDidTalkIdRef = useRef(null);
+  // Web-Audio analyser for driving CSS lip animation during bridge-audio phase
+  const audioAnalyserRef = useRef(null);
+  const lipSyncAnimRef = useRef(null);
+  const avatarStageRef = useRef(null);  // ref to the .avatar-stage div
+
+  // Hands-free continuous conversational mode (Auto-talk: speaks -> pauses -> answers -> listens)
+  const [handsFreeMode, setHandsFreeMode] = useState(true);
+  const handsFreeRef = useRef(true);
+  const activePageRef = useRef(activePage);
+  const handsFreeTimeoutRef = useRef(null);
+  const isSubmittingVoiceRef = useRef(false);
+  const voiceAbortControllerRef = useRef(null);
+  const shouldDiscardRecordingRef = useRef(false);
+
+  // Fetch initial avatar image and custom status
+  useEffect(() => {
+    fetch(`${API_URL}/avatar/custom-info`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.browser_url) {
+          const full = data.browser_url.startsWith("http")
+            ? data.browser_url
+            : `${API_URL}${data.browser_url}`;
+          setAvatarImageUrl(full);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const [avatarHistory, setAvatarHistory] = useState([
+    {
+      id: "welcome",
+      role: "assistant",
+      content: "Hi! I am your AI employee assistant. Ask me anything about attendance, leaves, salary, profile or policies!",
+      time: "Now",
+    },
+  ]);
+
+  useEffect(() => {
+    handsFreeRef.current = handsFreeMode;
+  }, [handsFreeMode]);
+
+  useEffect(() => {
+    activePageRef.current = activePage;
+  }, [activePage]);
 
   const [voiceCompact, setVoiceCompact] = useState(false);
   const [toast, setToast] = useState("");
@@ -289,22 +337,6 @@ function App() {
     };
   }, [userAudioUrl]);
 
-  useEffect(() => {
-    fetch(`${API_URL}/avatar/info`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.image_url) {
-          const cleanUrl = data.image_url.trim();
-          const img = cleanUrl.startsWith("http")
-            ? cleanUrl
-            : `${API_URL}${cleanUrl.startsWith("/") ? "" : "/"}${cleanUrl}`;
-          setAvatarImageUrl(img);
-        }
-      })
-      .catch(() => {
-        setAvatarImageUrl("/avatar-files/avtar_img.jpg");
-      });
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -451,6 +483,14 @@ function App() {
     setAvatarState("idle");
     setLatestUserText("");
     setLatestAiResponse("");
+    setAvatarHistory([
+      {
+        id: "welcome",
+        role: "assistant",
+        content: "Hi! I am your AI employee assistant. Ask me anything about attendance, leaves, salary, profile or policies!",
+        time: "Now",
+      },
+    ]);
     setActivePage("assistant");
     setSidebarOpen(false);
   };
@@ -552,6 +592,10 @@ function App() {
   };
 
   const stopRecording = () => {
+    if (handsFreeTimeoutRef.current) {
+      clearTimeout(handsFreeTimeoutRef.current);
+      handsFreeTimeoutRef.current = null;
+    }
     if (vadTimerRef.current) {
       clearTimeout(vadTimerRef.current);
       vadTimerRef.current = null;
@@ -559,6 +603,17 @@ function App() {
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
+    }
+    if (streamRef.current) {
+      try {
+        streamRef.current.getTracks().forEach((track) => {
+          track.stop();
+          track.enabled = false;
+        });
+      } catch (err) {
+        console.warn("Stop stream tracks error:", err);
+      }
+      streamRef.current = null;
     }
     if (audioContextRef.current) {
       try {
@@ -576,28 +631,88 @@ function App() {
         console.warn("Stop recorder error:", err);
       }
     }
+    setRecording(false);
+    setAudioLevel(0);
+    setMediaRecorder(null);
   };
 
-  const startRecorder = async (onBlob) => {
-    if (
-      recording ||
-      loading ||
-      voiceLoading
-    ) {
+  const stopAllAvatarActivity = () => {
+    console.log("[VOICE-LIFECYCLE] Stopping all avatar and voice activity immediately...");
+    shouldDiscardRecordingRef.current = true;
+    isSubmittingVoiceRef.current = false;
+
+    // 1. Abort any active in-flight /voice HTTP request
+    if (voiceAbortControllerRef.current) {
+      try {
+        voiceAbortControllerRef.current.abort();
+      } catch {}
+      voiceAbortControllerRef.current = null;
+    }
+
+    // 2. Stop microphone tracks and recorder
+    stopRecording();
+
+    // 3. Clear hands-free timer
+    if (handsFreeTimeoutRef.current) {
+      clearTimeout(handsFreeTimeoutRef.current);
+      handsFreeTimeoutRef.current = null;
+    }
+
+    // 4. Cancel D-ID video polling
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    pendingDidTalkIdRef.current = null;
+
+    // 5. Immediately halt active audio playback
+    if (activeAudioRef.current) {
+      try {
+        activeAudioRef.current.pause();
+        activeAudioRef.current.currentTime = 0;
+        activeAudioRef.current.src = "";
+      } catch {}
+      activeAudioRef.current = null;
+    }
+
+    // 6. Immediately halt active video playback
+    if (avatarVideoRef.current) {
+      try {
+        avatarVideoRef.current.pause();
+        avatarVideoRef.current.currentTime = 0;
+        delete avatarVideoRef.current.dataset.playingUrl;
+      } catch {}
+    }
+    setAvatarVideoUrl(null);
+
+    // 7. Stop bridge lip-sync animation
+    stopAudioLipSync();
+
+    // 8. Reset UI states
+    setHasActiveAudio(false);
+    setVoiceLoading(false);
+    setAvatarState("idle");
+  };
+
+  const startRecorder = async (onBlob, onBlobMode = "avatar_mode") => {
+    shouldDiscardRecordingRef.current = false;
+    if (document.hidden) {
+      console.log("[VOICE-MIC] Tab is hidden, skipping recorder start.");
+      return;
+    }
+    if (recording || loading || voiceLoading || isSubmittingVoiceRef.current) {
+      console.log("[VOICE-MIC] Recorder or submission already active, skipping start.");
       return;
     }
 
-    if (
-      !navigator.mediaDevices ||
-      !navigator.mediaDevices.getUserMedia
-    ) {
-      notify(
-        "Microphone is not supported in this browser."
-      );
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      console.error("[VOICE-MIC] navigator.mediaDevices.getUserMedia not supported.");
+      notify("Microphone is not supported in this browser.");
       return;
     }
 
     try {
+      console.log("[VOICE-MIC] Requesting microphone permission...");
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -607,17 +722,23 @@ function App() {
             autoGainControl: true,
           },
         });
-      } catch {
+      } catch (micErr) {
+        console.warn("[VOICE-MIC] Enhanced audio constraints failed, using standard audio:", micErr);
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       }
       streamRef.current = stream;
+      console.log("[VOICE-MIC] Microphone stream acquired successfully:", stream.getAudioTracks().map((t) => t.label).join(", "));
 
-      // Real-time audio level analyser for live visualizer wave
+      // Real-time audio level analyser for live visualizer wave & VAD
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (AudioContextClass) {
           const audioCtx = new AudioContextClass();
           audioContextRef.current = audioCtx;
+          if (audioCtx.state === "suspended") {
+            await audioCtx.resume();
+          }
+          console.log("[VOICE-MIC] AudioContext active, state:", audioCtx.state);
           const source = audioCtx.createMediaStreamSource(stream);
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 256;
@@ -625,6 +746,14 @@ function App() {
           source.connect(analyser);
 
           const pcmData = new Uint8Array(analyser.frequencyBinCount);
+
+          // Voice Activity Detection (VAD) for natural sentence capture
+          let hasSpoken = false;
+          let firstSpeechTime = null;
+          let lastSpeechTime = null;
+          const SPEECH_THRESHOLD = 8;  // 8% audio volume sensitivity
+          const SILENCE_MS = 2500;     // 2.5s silence after speaking before auto-submitting
+          const MIN_SPEECH_MS = 800;   // At least 0.8s of speech before silence detection can trigger
 
           const checkLevel = () => {
             if (!streamRef.current) return;
@@ -636,18 +765,36 @@ function App() {
             const avg = sum / pcmData.length;
             const volumePercent = Math.min(100, Math.round((avg / 128) * 100));
             setAudioLevel(volumePercent);
+
+            const now = Date.now();
+            if (volumePercent >= SPEECH_THRESHOLD) {
+              if (!hasSpoken) {
+                hasSpoken = true;
+                firstSpeechTime = now;
+                console.log(`[VOICE-VAD] Speech detected (volume: ${volumePercent}%). Listening to user question...`);
+              }
+              lastSpeechTime = now;
+            } else if (hasSpoken && firstSpeechTime && (now - firstSpeechTime > MIN_SPEECH_MS)) {
+              if (lastSpeechTime && (now - lastSpeechTime > SILENCE_MS)) {
+                console.log(`[VOICE-VAD] Sentence complete (${Math.round(now - lastSpeechTime)}ms pause after speaking). Submitting question...`);
+                stopRecording();
+                return;
+              }
+            }
+
             animFrameRef.current = requestAnimationFrame(checkLevel);
           };
           animFrameRef.current = requestAnimationFrame(checkLevel);
         }
       } catch (audioCtxErr) {
-        console.warn("AudioContext meter error:", audioCtxErr);
+        console.warn("[VOICE-MIC] AudioContext meter error:", audioCtxErr);
       }
 
-      // Max safety duration: 40 seconds
+      // Max safety duration: 45 seconds
       vadTimerRef.current = setTimeout(() => {
+        console.log("[VOICE-VAD] Maximum speech duration reached (45s). Stopping recording...");
         stopRecording();
-      }, 40000);
+      }, 45000);
 
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
@@ -666,15 +813,13 @@ function App() {
       };
 
       recorder.onerror = (event) => {
-        console.error(
-          "Recorder error:",
-          event
-        );
+        console.error("[VOICE-MIC] Recorder error:", event);
         stopRecording();
         notify("Microphone recording failed.");
       };
 
       recorder.onstop = async () => {
+        console.log("[VOICE-MIC] MediaRecorder stopped. Processing audio chunks...");
         if (vadTimerRef.current) {
           clearTimeout(vadTimerRef.current);
           vadTimerRef.current = null;
@@ -690,7 +835,10 @@ function App() {
           audioContextRef.current = null;
         }
         if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current.getTracks().forEach((track) => {
+            track.stop();
+            track.enabled = false;
+          });
           streamRef.current = null;
         }
 
@@ -698,37 +846,58 @@ function App() {
         setMediaRecorder(null);
         setAudioLevel(0);
 
-        const blob = new Blob(chunks, {
-          type: mimeType,
-        });
-
-        if (blob.size < 500) {
-          notify("No speech detected. Please speak into the microphone.");
-          setVoiceLoading(false);
-          setAvatarState("idle");
+        if (shouldDiscardRecordingRef.current || document.hidden || (activePageRef.current !== "avtar" && onBlobMode === "avatar_mode")) {
+          console.log("[VOICE-MIC] Discarding recording because user navigated away or switched tabs.");
           return;
         }
 
+        if (isSubmittingVoiceRef.current) {
+          console.log("[VOICE-MIC] Submission already running, skipping duplicate blob.");
+          return;
+        }
+
+        const blob = new Blob(chunks, {
+          type: mimeType,
+        });
+        console.log(`[VOICE-MIC] Audio recorded: ${blob.size} bytes (${mimeType}).`);
+
+        if (blob.size < 1000) {
+          console.log("[VOICE-MIC] Recorded audio too small or empty. Ignoring.");
+          setVoiceLoading(false);
+          // If on avatar page in hands-free mode, wait 1.5s then resume listening gracefully
+          if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+            setAvatarState("listening");
+            if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
+            handsFreeTimeoutRef.current = setTimeout(() => {
+              if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+                console.log("[VOICE-MIC] Hands-free re-arming after quiet period...");
+                startVoiceAI("avatar_mode");
+              }
+            }, 1500);
+          } else {
+            setAvatarState("idle");
+          }
+          return;
+        }
+
+        isSubmittingVoiceRef.current = true;
         try {
           await onBlob(blob);
         } catch (error) {
-          console.error(error);
+          console.error("[VOICE-API] Error submitting audio blob:", error);
+        } finally {
+          isSubmittingVoiceRef.current = false;
         }
       };
 
       recorder.start(250);
-
+      console.log("[VOICE-MIC] MediaRecorder started listening.");
       setMediaRecorder(recorder);
       setRecording(true);
     } catch (error) {
-      console.error(
-        "Microphone permission error:",
-        error
-      );
+      console.error("[VOICE-MIC] Microphone permission/init error:", error);
       stopRecording();
-      notify(
-        "Please allow microphone access from your browser."
-      );
+      notify("Please allow microphone access from your browser.");
     }
   };
 
@@ -835,16 +1004,61 @@ function App() {
     }
   };
 
+  const startAudioLipSync = () => {
+    if (lipSyncAnimRef.current) {
+      cancelAnimationFrame(lipSyncAnimRef.current);
+      lipSyncAnimRef.current = null;
+    }
+    const startTime = performance.now();
+    const tick = (now) => {
+      if (!activeAudioRef.current || activeAudioRef.current.paused || activeAudioRef.current.ended) {
+        if (avatarStageRef.current) {
+          avatarStageRef.current.style.setProperty("--lip-open", "0");
+        }
+        return;
+      }
+      const t = (now - startTime) / 1000;
+      // Multi-harmonic phonetic rhythm with natural speech cadence
+      const syllable = Math.sin(t * 8.5) * 0.42 + Math.sin(t * 14.8) * 0.28 + Math.sin(t * 5.3) * 0.2;
+      const breath = (Math.sin(t * 2.1) + 1) / 2;
+      const mouthOpen = breath > 0.15 ? Math.max(0, Math.min(1, 0.42 + syllable)) : 0.05;
+      if (avatarStageRef.current) {
+        avatarStageRef.current.style.setProperty("--lip-open", mouthOpen.toFixed(3));
+      }
+      lipSyncAnimRef.current = requestAnimationFrame(tick);
+    };
+    lipSyncAnimRef.current = requestAnimationFrame(tick);
+  };
+
+  const stopAudioLipSync = () => {
+    if (lipSyncAnimRef.current) {
+      cancelAnimationFrame(lipSyncAnimRef.current);
+      lipSyncAnimRef.current = null;
+    }
+    if (avatarStageRef.current) {
+      avatarStageRef.current.style.setProperty("--lip-open", "0");
+    }
+  };
+
   const pollAvatarVideo = (talkId) => {
     if (!talkId || talkId === "None" || talkId === "null") return;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
     }
 
+    // Store which talk we are polling so we can abort stale polls
+    pendingDidTalkIdRef.current = talkId;
     let attempts = 0;
-    const maxAttempts = 35; // 35 * 2s = 70 seconds max (D-ID renders in 15-30s)
+    const maxAttempts = 35; // 35 × 2 s = 70 s max
 
     pollIntervalRef.current = setInterval(async () => {
+      // If a newer request cancelled this poll, stop silently
+      if (pendingDidTalkIdRef.current !== talkId) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+        return;
+      }
+
       attempts += 1;
       try {
         const response = await fetch(`${API_URL}/avatar/status/${talkId}`);
@@ -856,38 +1070,70 @@ function App() {
         if (statusData.status === "done" && statusData.video_url) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
-
-          if (activeAudioRef.current) {
-            activeAudioRef.current.pause();
-            activeAudioRef.current = null;
-          }
+          pendingDidTalkIdRef.current = null;
 
           const fullVideoUrl = statusData.video_url.startsWith("http")
             ? statusData.video_url
             : `${API_URL}${statusData.video_url}`;
 
-          setAvatarVideoUrl(fullVideoUrl);
-          setAvatarState("speaking");
+          // ── IMPERATIVE SWITCH ──────────────────────────────────────────────
+          const vid = avatarVideoRef.current;
+          if (vid) {
+            if (activeAudioRef.current) {
+              activeAudioRef.current.pause();
+              activeAudioRef.current = null;
+            }
+            setHasActiveAudio(false);
+            stopAudioLipSync();
+
+            // Assign src imperatively — no React remount, no currentTime reset
+            vid.src = fullVideoUrl;
+            vid.dataset.playingUrl = fullVideoUrl;
+            vid.muted = false;
+            vid.loop = false;
+            vid.load(); // Trigger resource fetch for the new src
+            vid.play().catch((err) => {
+              console.warn("D-ID video autoplay blocked, trying muted:", err);
+              vid.muted = true;
+              vid.play().catch(() => {});
+            });
+
+            setAvatarVideoUrl(fullVideoUrl);
+            setAvatarState("speaking");
+          } else {
+            if (activeAudioRef.current) {
+              activeAudioRef.current.pause();
+              activeAudioRef.current = null;
+            }
+            setHasActiveAudio(false);
+            setAvatarVideoUrl(fullVideoUrl);
+            setAvatarState("speaking");
+          }
         } else if (statusData.status === "error") {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
+          pendingDidTalkIdRef.current = null;
           const errDetail = statusData.error || "Avatar video generation failed.";
-          console.error("Avatar generation error:", errDetail);
-          notify(`Avatar Error: ${errDetail}`);
-          setAvatarState("idle");
+          console.warn("Avatar video status error or credit limit:", errDetail);
+          // If insufficient credits or D-ID quota, don't throw an intrusive error popup
+          if (!errDetail.toLowerCase().includes("credit")) {
+            notify(`Avatar Video: ${errDetail}`);
+          }
+          // ElevenLabs voice continues playing smoothly!
+          setAvatarState(activeAudioRef.current ? "speaking" : "idle");
         } else if (attempts >= maxAttempts) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
+          pendingDidTalkIdRef.current = null;
           console.warn("Avatar video timed out after 70 seconds");
-          notify("Avatar video generation timed out. Please try again.");
-          setAvatarState("idle");
+          setAvatarState(activeAudioRef.current ? "speaking" : "idle");
         }
       } catch (err) {
         console.warn("Avatar status check error:", err);
         if (attempts >= maxAttempts) {
           clearInterval(pollIntervalRef.current);
           pollIntervalRef.current = null;
-          notify("Network error while checking avatar status.");
+          pendingDidTalkIdRef.current = null;
           setAvatarState("idle");
         }
       }
@@ -895,8 +1141,24 @@ function App() {
   };
 
   const handleAvatarVideoEnded = () => {
+    console.log("[VOICE-AVATAR] Avatar video finished.");
     setAvatarVideoUrl(null);
     setAvatarState("idle");
+    setHasActiveAudio(false);
+    if (avatarVideoRef.current) {
+      delete avatarVideoRef.current.dataset.playingUrl;
+    }
+    // If hands-free continuous talk is active, immediately start listening for next question
+    if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+      console.log("[VOICE-MIC] Ready for next question after video — re-arming microphone...");
+      setAvatarState("listening");
+      if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
+      handsFreeTimeoutRef.current = setTimeout(() => {
+        if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+          startVoiceAI("avatar_mode");
+        }
+      }, 400);
+    }
   };
 
   const triggerGreeting = async () => {
@@ -915,11 +1177,22 @@ function App() {
       if (!res.ok) throw new Error("Greeting request failed");
       const data = await res.json();
 
-      setLatestAiResponse(
+      const greetingText =
         data.text ||
-          "Hi, I'm your AI employee assistant. How can I help you today?"
-      );
+        "Hi, I'm your AI employee assistant. How can I help you today?";
+      setLatestAiResponse(greetingText);
       setLatestUserText("");
+      setAvatarHistory([
+        {
+          id: "greeting",
+          role: "assistant",
+          content: greetingText,
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
 
       if (data.video_url) {
         const fullVideo = data.video_url.startsWith("http")
@@ -931,13 +1204,32 @@ function App() {
         const audio = new Audio(`${API_URL}${data.audio_url}`);
         activeAudioRef.current = audio;
         setAvatarState("speaking");
+        startAudioLipSync();
         audio.onended = () => {
-          setAvatarState("idle");
+          stopAudioLipSync();
           activeAudioRef.current = null;
+          console.log("[VOICE-AVATAR] Greeting audio finished.");
+          // In hands-free mode, start listening immediately after greeting!
+          if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+            console.log("[VOICE-MIC] Starting microphone for user's first question...");
+            setAvatarState("listening");
+            if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
+            handsFreeTimeoutRef.current = setTimeout(() => {
+              if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+                startVoiceAI("avatar_mode");
+              }
+            }, 450);
+          } else {
+            setAvatarState("idle");
+          }
         };
         await audio
           .play()
           .catch((e) => console.warn("Greeting audio play blocked:", e));
+
+        if (data.talk_id) {
+          pollAvatarVideo(data.talk_id);
+        }
       } else {
         setAvatarState("idle");
       }
@@ -947,32 +1239,78 @@ function App() {
     }
   };
 
+  // 1. Completely stop voice detection & mic when user leaves the Avatar screen
   useEffect(() => {
+    activePageRef.current = activePage;
     if (activePage === "avtar") {
+      console.log("[LIFECYCLE] Entered Talking Avatar page — triggering greeting & voice setup.");
       triggerGreeting();
     } else {
-      if (avatarVideoUrl) {
-        setAvatarVideoUrl(null);
-      }
-      if (activeAudioRef.current) {
-        activeAudioRef.current.pause();
-        activeAudioRef.current = null;
-      }
+      console.log("[LIFECYCLE] Left Talking Avatar page — stopping voice detection & mic completely.");
+      stopAllAvatarActivity();
     }
   }, [activePage]);
 
+  // 2. Completely stop voice detection & mic when user switches browser tab or window loses focus
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) {
+        console.log("[LIFECYCLE] Browser tab hidden/inactive — stopping voice detection & mic.");
+        stopAllAvatarActivity();
+      } else {
+        console.log("[LIFECYCLE] Browser tab resumed/active.");
+        if (activePageRef.current === "avtar" && handsFreeRef.current) {
+          if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
+          handsFreeTimeoutRef.current = setTimeout(() => {
+            if (activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+              console.log("[LIFECYCLE] Resuming voice listening on active avatar tab.");
+              setAvatarState("listening");
+              startVoiceAI("avatar_mode");
+            }
+          }, 600);
+        }
+      }
+    };
+    const handleWindowBlur = () => {
+      if (document.hidden) {
+        stopAllAvatarActivity();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("blur", handleWindowBlur);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, []);
+
   const startVoiceAI = (explicitMode = null) => {
+    if (document.hidden) {
+      console.log("[VOICE-LIFECYCLE] Tab is hidden, ignoring voice start.");
+      return;
+    }
+    const mode = explicitMode || (activePageRef.current === "avtar" ? "avatar_mode" : "voice_mode");
+    if (mode === "avatar_mode" && activePageRef.current !== "avtar") {
+      console.log("[VOICE-LIFECYCLE] Not on avtar page, ignoring avatar voice start.");
+      return;
+    }
+    if (isSubmittingVoiceRef.current) {
+      console.log("[VOICE-MIC] Voice submission already in progress.");
+      return;
+    }
+
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
     if (activeAudioRef.current) {
-      activeAudioRef.current.pause();
+      try {
+        activeAudioRef.current.pause();
+      } catch {}
       activeAudioRef.current = null;
     }
     setHasActiveAudio(false);
-
-    const mode = explicitMode || (activePage === "avtar" ? "avatar_mode" : "voice_mode");
 
     if (mode === "avatar_mode") {
       setAvatarVideoUrl(null);
@@ -980,6 +1318,7 @@ function App() {
     }
 
     return startRecorder(async (audioBlob) => {
+      console.log(`[VOICE-API] Submitting audio to backend (${audioBlob.size} bytes, mode: ${mode})...`);
       setVoiceLoading(true);
       if (mode === "avatar_mode") {
         setAvatarState("thinking");
@@ -999,16 +1338,37 @@ function App() {
         formData.append("employee_id", String(employee.employee_id));
         formData.append("mode", mode);
 
+        voiceAbortControllerRef.current = new AbortController();
+
         const response = await fetch(`${API_URL}/voice`, {
           method: "POST",
           body: formData,
+          signal: voiceAbortControllerRef.current.signal,
         });
 
         if (!response.ok) {
-          throw new Error("Voice assistant request failed.");
+          throw new Error(`Voice assistant request failed with status ${response.status}`);
         }
 
         const data = await response.json();
+
+        // If user left avatar page or tab was hidden during processing, discard response immediately
+        if (
+          (mode === "avatar_mode" && activePageRef.current !== "avtar") ||
+          document.hidden ||
+          shouldDiscardRecordingRef.current
+        ) {
+          console.log("[VOICE-API] Discarding voice response because user left avatar page or tab is hidden.");
+          return;
+        }
+
+        console.log("[VOICE-API] Assistant response received:", {
+          user_text: data?.user_text,
+          response: data?.response?.slice(0, 80),
+          audio_url: data?.audio_url,
+          talk_id: data?.avatar_talk_id || data?.avatar?.talk_id,
+        });
+
         if (!data?.audio_url) {
           throw new Error("Voice response did not include audio.");
         }
@@ -1016,39 +1376,77 @@ function App() {
         const userText = data.user_text || "Voice message";
         const aiResponse = data.response || "Your voice request has been processed.";
         const url = `${API_URL}${data.audio_url}`;
+        const now = new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
 
         if (mode === "avatar_mode") {
-          // --- AVATAR MODE: INSTANT RESPONSE (Zero Delay) ---
           setLatestUserText(userText);
           setLatestAiResponse(aiResponse);
 
-          // 1. Play ElevenLabs avatar voice IMMEDIATELY
+          // Update avatar chat history
+          const userMsg = { id: Date.now(), role: "user", content: userText, time: now };
+          const aiMsg = { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now };
+          setAvatarHistory((prev) => [...prev, userMsg, aiMsg]);
+
+          // Also keep assistant tab in sync
+          setMessages((prev) => [
+            ...prev,
+            { id: Date.now(), role: "user", content: userText, time: now, voice: true },
+            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
+          ]);
+
           if (activeAudioRef.current) {
             activeAudioRef.current.pause();
             activeAudioRef.current = null;
           }
+          stopAudioLipSync();
+
           const avatarAudio = new Audio(url);
           activeAudioRef.current = avatarAudio;
           avatarAudio.playbackRate = 1.0;
           setHasActiveAudio(true);
           setAvatarState("speaking");
+          console.log("[VOICE-AVATAR] Playing ElevenLabs response audio...");
 
-          // 2. Play natural talking avatar video in sync with audio
-          const vUrl = data?.avatar_video_url
-            ? (data.avatar_video_url.startsWith("http") ? data.avatar_video_url : `${API_URL}${data.avatar_video_url}`)
-            : `${API_URL}/avatar-files/response_avatar.mp4`;
-          setAvatarVideoUrl(vUrl);
+          avatarAudio.onplay = () => startAudioLipSync();
+          avatarAudio.onpause = () => stopAudioLipSync();
+
+          setAvatarVideoUrl(null);
 
           avatarAudio.onended = () => {
-            setAvatarVideoUrl(null);
-            setAvatarState("idle");
-            setHasActiveAudio(false);
-            activeAudioRef.current = null;
+            console.log("[VOICE-AVATAR] Audio response ended.");
+            stopAudioLipSync();
+            if (activeAudioRef.current === avatarAudio) {
+              activeAudioRef.current = null;
+              setHasActiveAudio(false);
+            }
+            // Continuous conversation loop: user can immediately speak again!
+            if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+              console.log("[VOICE-MIC] Ready for next question — re-arming microphone...");
+              setAvatarState("listening");
+              if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
+              handsFreeTimeoutRef.current = setTimeout(() => {
+                if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+                  startVoiceAI("avatar_mode");
+                }
+              }, 400);
+            } else {
+              setAvatarState("idle");
+            }
           };
 
           avatarAudio.play().catch((e) => {
-            console.warn("Avatar voice autoplay restricted:", e);
+            console.warn("[VOICE-AVATAR] Audio autoplay restricted:", e);
           });
+
+          // Phase 2: poll for D-ID video in parallel
+          const didTalkId =
+            data?.avatar_talk_id ||
+            data?.avatar?.talk_id ||
+            "latest";
+          pollAvatarVideo(didTalkId);
         } else {
           // --- VOICE MODE (Assistant tab) ---
           setLatestUserText(userText);
@@ -1057,26 +1455,8 @@ function App() {
 
           setMessages((prev) => [
             ...prev,
-            {
-              id: Date.now(),
-              role: "user",
-              content: userText,
-              time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-              voice: true,
-            },
-            {
-              id: Date.now() + 1,
-              role: "assistant",
-              content: aiResponse,
-              time: new Date().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-              voice: true,
-            },
+            { id: Date.now(), role: "user", content: userText, time: now, voice: true },
+            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
           ]);
 
           const audio = new Audio(url);
@@ -1086,7 +1466,11 @@ function App() {
           setVoiceCompact(true);
         }
       } catch (error) {
-        console.error("Voice assistant error:", error);
+        if (error.name === "AbortError") {
+          console.log("[VOICE-API] Voice request aborted cleanly by user navigation.");
+          return;
+        }
+        console.error("[VOICE-API] Voice assistant error:", error);
         setAvatarState("idle");
 
         if (mode !== "avatar_mode") {
@@ -1386,6 +1770,7 @@ function App() {
         {activePage === "avtar" && (
           <AvtarPage
             avatarImageUrl={avatarImageUrl}
+            setAvatarImageUrl={setAvatarImageUrl}
             avatarVideoUrl={avatarVideoUrl}
             avatarState={avatarState}
             setAvatarState={setAvatarState}
@@ -1400,6 +1785,8 @@ function App() {
             onVideoEnded={handleAvatarVideoEnded}
             onReplayGreeting={triggerGreeting}
             hasActiveAudio={hasActiveAudio}
+            notify={notify}
+            API_URL={API_URL}
           />
         )}
 
@@ -1434,6 +1821,31 @@ function App() {
           />
         )}
       </main>
+
+      {/* ── Floating Avatar Shortcut ─────────────────────────────────────
+          Visible on every page except the Avtar page itself.
+          Reuses avatarImageUrl and openPage — no new logic.             */}
+      {activePage !== "avtar" && (
+        <button
+          type="button"
+          className="floating-avatar-btn"
+          onClick={() => openPage("avtar")}
+          title="Talk with Avtar"
+          aria-label="Open Talking Avatar"
+          id="floating-avatar-shortcut"
+        >
+          <img
+            className="floating-avatar-img"
+            src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+            alt="Avtar"
+            onError={(e) => {
+              e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+            }}
+          />
+          <span className="floating-avatar-ripple" />
+          <span className="floating-avatar-tooltip">Talk with Avtar</span>
+        </button>
+      )}
 
       {toast && (
         <div className="toast">
@@ -1508,6 +1920,7 @@ function CompanyLogo({ className = "" }) {
 
 function AvtarPage({
   avatarImageUrl,
+  setAvatarImageUrl,
   avatarVideoUrl,
   avatarState = "idle",
   setAvatarVideoUrl,
@@ -1522,9 +1935,85 @@ function AvtarPage({
   onVideoEnded,
   onReplayGreeting,
   hasActiveAudio = false,
+  notify,
+  API_URL,
 }) {
   const videoRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+
+  const isCustomAvatar = Boolean(
+    avatarImageUrl &&
+      (avatarImageUrl.includes("custom_avatar") ||
+        avatarImageUrl.includes("custom-avatar"))
+  );
+
+  const handleAvatarFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      notify?.("Please select a valid image file (JPG, PNG, WebP).");
+      return;
+    }
+
+    setUploadingAvatar(true);
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+
+      const res = await fetch(`${API_URL}/avatar/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || "Avatar upload failed.");
+      }
+
+      const data = await res.json();
+      const updatedUrl = data.browser_url.startsWith("http")
+        ? data.browser_url
+        : `${API_URL}${data.browser_url}?t=${Date.now()}`;
+
+      setAvatarImageUrl?.(updatedUrl);
+      notify?.("Custom avatar updated successfully!");
+      if (onReplayGreeting) {
+        setTimeout(() => {
+          onReplayGreeting();
+        }, 350);
+      }
+    } catch (err) {
+      console.error("[AVATAR] Upload error:", err);
+      notify?.(err.message || "Failed to upload custom avatar.");
+    } finally {
+      setUploadingAvatar(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleResetAvatar = async () => {
+    setUploadingAvatar(true);
+    try {
+      const res = await fetch(`${API_URL}/avatar/reset`, { method: "POST" });
+      if (!res.ok) throw new Error("Reset failed.");
+      setAvatarImageUrl?.(`${API_URL}/avatar-files/avtar_img.jpg`);
+      notify?.("Avatar reset to default.");
+      if (onReplayGreeting) {
+        setTimeout(() => {
+          onReplayGreeting();
+        }, 350);
+      }
+    } catch (err) {
+      console.error("[AVATAR] Reset error:", err);
+      notify?.("Failed to reset avatar.");
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
 
   useEffect(() => {
     if (avatarVideoUrl && videoRef.current) {
@@ -1625,6 +2114,49 @@ function AvtarPage({
             <h1>Talk with Avtar</h1>
           </div>
           <div className="avatar-header-actions">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/jpg"
+              style={{ display: "none" }}
+              onChange={handleAvatarFileSelect}
+            />
+            {isCustomAvatar ? (
+              <div className="avatar-custom-chip-group">
+                <span className="avatar-custom-badge" title="Custom avatar active">
+                  ✨ Custom
+                </span>
+                <button
+                  type="button"
+                  className="avatar-header-chip"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadingAvatar || recording || voiceLoading}
+                  title="Change custom photo"
+                >
+                  {uploadingAvatar ? "..." : "Change"}
+                </button>
+                <button
+                  type="button"
+                  className="avatar-header-chip"
+                  onClick={handleResetAvatar}
+                  disabled={uploadingAvatar || recording || voiceLoading}
+                  title="Reset to default avatar"
+                >
+                  ↺ Default
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="avatar-header-chip avatar-upload-chip"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingAvatar || recording || voiceLoading}
+                title="Upload custom face / photo for avatar"
+              >
+                <span>📷</span> {uploadingAvatar ? "Uploading..." : "Custom Avatar"}
+              </button>
+            )}
+
             {onReplayGreeting && (
               <button
                 type="button"
@@ -1792,6 +2324,62 @@ function AvtarPage({
               </div>
             )}
 
+            {/* What Can I Ask? Help Panel */}
+            {showHelp && (
+              <div className="avatar-help-panel">
+                <div className="help-panel-header">
+                  <span className="help-panel-icon">💡</span>
+                  <strong>What Can I Ask?</strong>
+                  <button
+                    type="button"
+                    className="help-close-btn"
+                    onClick={() => setShowHelp(false)}
+                    title="Close help"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="help-panel-grid">
+                  <div className="help-category">
+                    <span className="help-cat-label">📅 Attendance</span>
+                    <ul>
+                      <li>"Show my attendance"</li>
+                      <li>"Was I present yesterday?"</li>
+                      <li>"Meri September ki attendance batao"</li>
+                      <li>"Aaj main present tha?"</li>
+                    </ul>
+                  </div>
+                  <div className="help-category">
+                    <span className="help-cat-label">🌴 Leave</span>
+                    <ul>
+                      <li>"How many leaves do I have?"</li>
+                      <li>"Meri leave balance kya hai?"</li>
+                      <li>"Show my approved leaves"</li>
+                      <li>"Leaves kaise apply karte hain?"</li>
+                    </ul>
+                  </div>
+                  <div className="help-category">
+                    <span className="help-cat-label">👤 Profile & Shift</span>
+                    <ul>
+                      <li>"Show my profile"</li>
+                      <li>"What is my shift?"</li>
+                      <li>"Meri designation kya hai?"</li>
+                      <li>"Which branch am I in?"</li>
+                    </ul>
+                  </div>
+                  <div className="help-category">
+                    <span className="help-cat-label">🎉 Holidays</span>
+                    <ul>
+                      <li>"What are company holidays?"</li>
+                      <li>"2026 mein holidays kab hain?"</li>
+                      <li>"Is October mein holiday hai?"</li>
+                    </ul>
+                  </div>
+                </div>
+                <p className="help-panel-footer">Hindi, English ya Hinglish — kisi bhi language mein poochein! 🇮🇳</p>
+              </div>
+            )}
+
             <div className="avatar-action-deck">
               <button
                 type="button"
@@ -1814,6 +2402,15 @@ function AvtarPage({
                     ? "Ask Another Question"
                     : "Tap to Speak"}
                 </span>
+              </button>
+              <button
+                type="button"
+                className={`avatar-help-toggle ${showHelp ? "active" : ""}`}
+                onClick={() => setShowHelp((prev) => !prev)}
+                title="What can I ask?"
+              >
+                <span>💡</span>
+                <span>What Can I Ask?</span>
               </button>
               <span className="avatar-hint-caption">
                 {recording
@@ -2848,74 +3445,33 @@ function ProfileField({
   );
 }
 
-function Settings({
-  clearChat,
-}) {
-  const [autoSpeak, setAutoSpeak] =
-    useState(false);
-
-  const [voiceMode, setVoiceMode] =
-    useState(true);
+function Settings({ clearChat }) {
+  const [autoSpeak, setAutoSpeak] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(true);
 
   return (
     <div className="page">
       <div className="page-heading">
         <div>
-          <span className="eyebrow">
-            SETTINGS
-          </span>
-
-          <h1>
-            Preferences
-          </h1>
-
-          <p>
-            Customize your assistant
-            experience.
-          </p>
+          <span className="eyebrow">SETTINGS</span>
+          <h1>Preferences</h1>
+          <p>Customize your assistant experience.</p>
         </div>
       </div>
 
       <div className="settings-card">
-        <SettingRow
-          title="Voice assistant"
-          desc="Allow voice conversations with your assistant."
-        >
-          <Toggle
-            value={voiceMode}
-            onChange={setVoiceMode}
-          />
+        <SettingRow title="Voice assistant" desc="Allow voice conversations with your assistant.">
+          <Toggle value={voiceMode} onChange={setVoiceMode} />
         </SettingRow>
 
-        <SettingRow
-          title="Automatic voice replies"
-          desc="Play voice responses automatically when available."
-        >
-          <Toggle
-            value={autoSpeak}
-            onChange={setAutoSpeak}
-          />
+        <SettingRow title="Automatic voice replies" desc="Play voice responses automatically when available.">
+          <Toggle value={autoSpeak} onChange={setAutoSpeak} />
         </SettingRow>
 
-        <SettingRow
-          title="Conversation history"
-          desc="Clear conversations stored on this device."
-        >
-          <button
-            className="danger-button"
-            onClick={clearChat}
-          >
+        <SettingRow title="Conversation history" desc="Clear conversations stored on this device.">
+          <button className="danger-button" onClick={clearChat}>
             Clear history
           </button>
-        </SettingRow>
-
-        <SettingRow
-          title="Talking avatar"
-          desc="The visual assistant experience will be added in a future update."
-        >
-          <span className="coming-soon">
-            COMING SOON
-          </span>
         </SettingRow>
       </div>
     </div>

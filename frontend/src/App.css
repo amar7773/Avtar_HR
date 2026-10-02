@@ -875,6 +875,55 @@ textarea:focus-visible {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.avatar-header-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #cbd5e1;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.avatar-header-chip:hover:not(:disabled) {
+  background: rgba(124, 108, 255, 0.2);
+  border-color: rgba(124, 108, 255, 0.55);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(124, 108, 255, 0.25);
+}
+
+.avatar-header-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.avatar-custom-chip-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 3px 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(124, 108, 255, 0.25);
+}
+
+.avatar-custom-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
 }
 
 .avatar-replay-chip {
@@ -1050,6 +1099,16 @@ textarea:focus-visible {
   display: block;
   z-index: 2;
   background: #060910;
+}
+
+/* When avatarVideoUrl is null the <video> stays mounted (so videoRef.current
+   is always valid for imperative src switching) but is invisible. */
+.avatar-image--hidden {
+  display: none !important;
+}
+
+.avatar-video--hidden {
+  display: none !important;
 }
 
 /* State Overlays on Avatar */
@@ -1287,6 +1346,7 @@ textarea:focus-visible {
 }
 
 .avatar-hint-caption {
+  display: block;
   color: var(--muted-2);
   font-size: 12px;
   text-align: center;
@@ -1332,6 +1392,8 @@ textarea:focus-visible {
   width: 100%;
   max-width: none;
   aspect-ratio: 1 / 1;   /* square on desktop */
+  position: sticky;
+  top: 0;
 }
 
 /* Right column: flex column, fills height */
@@ -1347,6 +1409,10 @@ textarea:focus-visible {
   margin-top: auto;
   width: 100%;
   max-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 .avatar-mic-trigger {
@@ -1361,6 +1427,7 @@ textarea:focus-visible {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  max-height: 520px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -3789,4 +3856,518 @@ textarea:focus-visible {
 
 .formatted-gap {
   height: 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   FLOATING AVATAR SHORTCUT BUTTON
+   Fixed bottom-right; always above page content; hidden on Avtar page.
+═══════════════════════════════════════════════════════════════════════ */
+
+.floating-avatar-btn {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  z-index: 1100;
+
+  /* Perfect circle */
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  overflow: visible;
+  cursor: pointer;
+
+  /* Glassy layered background behind the image */
+  background: linear-gradient(145deg, rgba(124, 108, 255, 0.22), rgba(56, 189, 248, 0.14));
+  box-shadow:
+    0 0 0 2.5px rgba(124, 108, 255, 0.55),
+    0 8px 28px rgba(0, 0, 0, 0.55),
+    0 2px 8px rgba(0, 0, 0, 0.35);
+
+  /* Smooth all interactions */
+  transition:
+    transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.22s ease,
+    opacity 0.18s ease;
+
+  /* Entrance animation */
+  animation: floatBtnAppear 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes floatBtnAppear {
+  from {
+    opacity: 0;
+    transform: scale(0.55) translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.floating-avatar-btn:hover {
+  transform: scale(1.1) translateY(-3px);
+  box-shadow:
+    0 0 0 3px rgba(124, 108, 255, 0.75),
+    0 0 28px rgba(124, 108, 255, 0.45),
+    0 14px 40px rgba(0, 0, 0, 0.65),
+    0 3px 10px rgba(0, 0, 0, 0.4);
+}
+
+.floating-avatar-btn:active {
+  transform: scale(0.96) translateY(0);
+  transition-duration: 0.1s;
+}
+
+/* Avatar image — fills the circle perfectly */
+.floating-avatar-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center top;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Pulsing outer ring — indicates "AI is available" */
+.floating-avatar-ripple {
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 108, 255, 0.5);
+  pointer-events: none;
+  animation: avatarRipple 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes avatarRipple {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  70% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+}
+
+/* Tooltip — appears above the button on hover */
+.floating-avatar-tooltip {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  white-space: nowrap;
+
+  background: rgba(13, 17, 26, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(124, 108, 255, 0.35);
+  color: #e0dcff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+
+  /* Hidden by default; visible on parent hover */
+  opacity: 0;
+  transform: translateY(6px) scale(0.95);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Small arrow pointing down */
+.floating-avatar-tooltip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 18px;
+  border: 5px solid transparent;
+  border-top-color: rgba(124, 108, 255, 0.35);
+}
+
+.floating-avatar-btn:hover .floating-avatar-tooltip {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+/* Mobile: slightly smaller and tuck in from the edge */
+@media (max-width: 640px) {
+  .floating-avatar-btn {
+    width: 54px;
+    height: 54px;
+    bottom: 20px;
+    right: 16px;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   AUDIO-DRIVEN SPEAKING STATE
+   Avatar's original face and mouth remain 100% intact with zero artificial
+   overlays. Natural ambient aura reacts to voice speech dynamics.
+═══════════════════════════════════════════════════════════════════════ */
+
+.avatar-stage.audio-lipsync .avatar-image {
+  /* Living subtle presence while speaking */
+  filter: brightness(1.02);
+  transition: filter 0.2s ease;
+}
+
+/* Natural speaking glow that pulses subtly with audio signal */
+.avatar-stage.audio-lipsync {
+  --glow-intensity: calc(var(--lip-open, 0) * 25px);
+  box-shadow:
+    0 0 var(--glow-intensity) rgba(124, 108, 255, 0.5),
+    0 24px 60px rgba(0, 0, 0, 0.5),
+    inset 0 0 40px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 0.08s linear;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CUSTOM AVATAR UPLOAD UI (Settings page)
+═══════════════════════════════════════════════════════════════════════ */
+
+.settings-section-title {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: var(--accent-2);
+  text-transform: uppercase;
+  padding: 24px 0 10px;
+  margin: 0 4px;
+}
+
+.avatar-upload-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 6px 0;
+}
+
+/* ── Preview circle ───────────────────────────────────────────────── */
+.avatar-upload-preview-wrap {
+  position: relative;
+  align-self: flex-start;
+}
+
+.avatar-upload-preview {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center top;
+  border: 2.5px solid rgba(124, 108, 255, 0.5);
+  box-shadow: 0 0 0 4px rgba(124, 108, 255, 0.12), 0 8px 24px rgba(0,0,0,0.4);
+  display: block;
+}
+
+.avatar-upload-badge {
+  position: absolute;
+  bottom: -6px;
+  right: -6px;
+  background: linear-gradient(135deg, #7c6cff, #38bdf8);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(124,108,255,0.5);
+}
+
+/* ── Drop zone ───────────────────────────────────────────────────── */
+.avatar-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 20px;
+  border: 1.5px dashed rgba(148, 163, 184, 0.3);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, transform 0.12s;
+  user-select: none;
+  min-height: 120px;
+}
+
+.avatar-dropzone:hover:not(.uploading) {
+  border-color: rgba(124, 108, 255, 0.6);
+  background: rgba(124, 108, 255, 0.06);
+  transform: translateY(-1px);
+}
+
+.avatar-dropzone.dragging {
+  border-color: rgba(124, 108, 255, 0.85);
+  background: rgba(124, 108, 255, 0.1);
+  transform: scale(1.01);
+}
+
+.avatar-dropzone.uploading {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+.avatar-dropzone-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.avatar-dropzone-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-soft);
+  text-align: center;
+}
+
+.avatar-dropzone-hint {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ── Upload spinner ─────────────────────────────────────────────── */
+.avatar-upload-spinner {
+  display: inline-block;
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(124, 108, 255, 0.25);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spinSm 0.7s linear infinite;
+}
+
+@keyframes spinSm {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Upload message banner ─────────────────────────────────────── */
+.avatar-upload-msg {
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+.avatar-upload-msg--success {
+  background: rgba(74, 222, 154, 0.12);
+  border: 1px solid rgba(74, 222, 154, 0.35);
+  color: #4ade9a;
+}
+
+.avatar-upload-msg--warning {
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  color: #fbbf24;
+}
+
+.avatar-upload-msg--error {
+  background: rgba(255, 113, 136, 0.1);
+  border: 1px solid rgba(255, 113, 136, 0.35);
+  color: var(--danger);
+}
+
+/* ── Reset button ───────────────────────────────────────────────── */
+.avatar-reset-btn {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  border-radius: 999px;
+  background: rgba(255, 113, 136, 0.1);
+  border: 1px solid rgba(255, 113, 136, 0.3);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, transform 0.14s;
+}
+
+.avatar-reset-btn:hover:not(:disabled) {
+  background: rgba(255, 113, 136, 0.2);
+  border-color: rgba(255, 113, 136, 0.55);
+  transform: translateY(-1px);
+}
+
+.avatar-reset-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Upload note ───────────────────────────────────────────────── */
+.avatar-upload-note {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* ── What Can I Ask? Help Toggle Button ─────────────────────────── */
+.avatar-help-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(124, 108, 255, 0.1);
+  border: 1px solid rgba(124, 108, 255, 0.25);
+  color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, transform 0.15s, box-shadow 0.18s;
+  white-space: nowrap;
+}
+
+.avatar-help-toggle:hover {
+  background: rgba(124, 108, 255, 0.18);
+  border-color: rgba(124, 108, 255, 0.5);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(124, 108, 255, 0.2);
+}
+
+.avatar-help-toggle.active {
+  background: rgba(124, 108, 255, 0.22);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124, 108, 255, 0.15);
+}
+
+/* ── What Can I Ask? Help Panel ────────────────────────────────── */
+.avatar-help-panel {
+  background: linear-gradient(135deg, rgba(17, 23, 34, 0.97) 0%, rgba(21, 28, 41, 0.97) 100%);
+  border: 1px solid rgba(124, 108, 255, 0.25);
+  border-radius: 14px;
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(124, 108, 255, 0.08);
+  animation: helpPanelIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes helpPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.help-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.help-panel-header strong {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.help-panel-icon {
+  font-size: 16px;
+}
+
+.help-close-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.help-close-btn:hover {
+  background: rgba(255, 113, 136, 0.15);
+  border-color: rgba(255, 113, 136, 0.3);
+  color: var(--danger);
+}
+
+.help-panel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 520px) {
+  .help-panel-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.help-category {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.help-cat-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 7px;
+}
+
+.help-category ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.help-category ul li {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  padding: 3px 0;
+  padding-left: 12px;
+  position: relative;
+  line-height: 1.45;
+}
+
+.help-category ul li::before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+  font-size: 10px;
+  top: 3px;
+}
+
+.help-panel-footer {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin: 0;
 }

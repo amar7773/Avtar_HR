@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -254,10 +255,9 @@ async def voice(
             mode=mode
         )
     except Exception as error:
-        print("[VOICE ERROR]:", error)
         raise HTTPException(
-        status_code=502,
-        detail=str(error)
+            status_code=502,
+            detail=str(error),
         ) from error
     finally:
         safe_unlink(input_audio_path)
@@ -336,12 +336,14 @@ def get_avatar_status(talk_id: str):
                 "video_url": video_url,
             }
         elif d_status in ("error", "failed"):
+            raw_err = status_data.get("data", {}).get("error") or "Avatar generation failed."
+            is_credit = "credit" in str(raw_err).lower()
             return {
                 "status": "error",
                 "talk_id": talk_id,
                 "video_url": None,
-                "error": status_data.get("data", {}).get("error")
-                or "Avatar generation failed.",
+                "error": "Insufficient D-ID credits" if is_credit else str(raw_err),
+                "credit_exhausted": is_credit,
             }
         else:
             return {
@@ -382,6 +384,7 @@ def get_avatar_info():
 def get_avatar_greeting():
     greeting_text = "Hi, I'm your AI employee assistant. How can I help you today?"
     greeting_video_path = AVATAR_DIR / "greeting_avatar.mp4"
+    custom_video_path = AVATAR_DIR / "greeting_custom_avatar.mp4"
     greeting_audio_path = VOICE_DIR / "greeting.mp3"
 
     if not greeting_audio_path.exists():
@@ -393,10 +396,42 @@ def get_avatar_greeting():
         except Exception as error:
             print(f"[GREETING ERROR] TTS audio generation failed: {error}")
 
-    has_video = (
-        greeting_video_path.exists()
-        and greeting_video_path.stat().st_size > 10000
-    )
+    from Avtar.avtar_config import get_avatar
+    cfg = get_avatar()
+    browser_url = cfg.get("browser_url", "/avatar-files/avtar_img.jpg")
+    is_custom = "custom_avatar" in browser_url
+
+    video_url = None
+    talk_id = None
+
+    if is_custom:
+        if custom_video_path.exists() and custom_video_path.stat().st_size > 10000:
+            video_url = f"/avatar-files/{custom_video_path.name}"
+        else:
+            # Initiate D-ID talk for custom avatar greeting using ElevenLabs audio
+            image_url = cfg.get("image_url")
+            if image_url and greeting_audio_path.exists():
+                try:
+                    from Avtar.DID_Servicee import DIDService
+                    did = DIDService()
+                    talk_res = did.start_talking_avatar_from_audio(
+                        image_url=image_url,
+                        audio_path=str(greeting_audio_path),
+                        expression="happy",
+                    )
+                    talk_id = talk_res.get("talk_id")
+                    if talk_id:
+                        get_assistant()._latest_avatar_status = {
+                            "talk_id": talk_id,
+                            "status": "processing",
+                            "video_url": None,
+                            "is_greeting": True,
+                        }
+                except Exception as did_err:
+                    print(f"[GREETING D-ID INFO] Custom avatar D-ID talk initiation: {did_err}")
+    else:
+        if greeting_video_path.exists() and greeting_video_path.stat().st_size > 10000:
+            video_url = f"/avatar-files/{greeting_video_path.name}"
 
     return {
         "text": greeting_text,
@@ -405,10 +440,163 @@ def get_avatar_greeting():
             if greeting_audio_path.exists()
             else None
         ),
-        "video_url": (
-            f"/avatar-files/{greeting_video_path.name}"
-            if has_video
-            else None
-        ),
-        "status": "ready",
+        "video_url": video_url,
+        "talk_id": talk_id,
+        "browser_url": browser_url,
+        "is_custom": is_custom,
+        "status": "ready" if (video_url or greeting_audio_path.exists()) else "processing",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom Avatar Upload / Reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+@app.post("/avatar/upload")
+async def upload_custom_avatar(image: UploadFile = File(...)):
+    """
+    Accept a user-supplied image, save it locally, upload it to D-ID, and
+    update avtar_config.json so all future avatar talks use the new face.
+    Returns the browser-accessible URL of the saved image.
+    """
+    suffix = Path(image.filename or "").suffix.lower()
+    if suffix not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported image format '{suffix}'. Allowed: {', '.join(ALLOWED_IMAGE_EXTENSIONS)}",
+        )
+
+    raw = await image.read()
+    if len(raw) > MAX_IMAGE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Image exceeds the 10 MB size limit.",
+        )
+    if len(raw) < 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file appears to be empty or too small.",
+        )
+
+    # Persist locally so it is served via /avatar-files/
+    local_filename = f"custom_avatar{suffix}"
+    local_path = AVATAR_DIR / local_filename
+    try:
+        local_path.write_bytes(raw)
+    except Exception as save_err:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save image: {save_err}",
+        ) from save_err
+
+    # Clean up old custom greeting video if present
+    custom_greeting = AVATAR_DIR / "greeting_custom_avatar.mp4"
+    if custom_greeting.exists():
+        try:
+            custom_greeting.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    browser_url = f"/avatar-files/{local_filename}"
+
+    # Upload to D-ID and update config
+    try:
+        from Avtar.DID_Servicee import DIDService
+        from Avtar.avtar_config import save_avatar
+
+        did = DIDService()
+        did_result = did.upload_image(str(local_path))
+        image_id = did_result.get("image_id") or ""
+        image_url = did_result.get("image_url") or ""
+
+        save_avatar(
+            image_id=image_id,
+            image_url=image_url,
+            browser_url=browser_url,
+        )
+        return {
+            "success": True,
+            "browser_url": browser_url,
+            "image_id": image_id,
+            "image_url": image_url,
+            "message": "Custom avatar uploaded and activated successfully.",
+        }
+    except Exception as did_err:
+        # D-ID upload failed — still serve the locally saved image for the UI,
+        # but fall back to the existing D-ID image_url for lip-sync generation.
+        print(f"[AVATAR UPLOAD] D-ID upload failed, using local file only: {did_err}")
+        try:
+            from Avtar.avtar_config import get_avatar, save_avatar
+            existing = get_avatar()
+            save_avatar(
+                image_id=existing.get("image_id", ""),
+                image_url=existing.get("image_url", ""),
+                browser_url=browser_url,
+            )
+        except Exception:
+            pass
+        return {
+            "success": True,
+            "browser_url": browser_url,
+            "image_id": None,
+            "image_url": None,
+            "warning": f"Image saved locally but D-ID upload failed: {did_err}. Lip-sync will use the previous D-ID image.",
+        }
+
+
+@app.post("/avatar/reset")
+def reset_avatar():
+    """Reset the avatar back to the built-in default."""
+    try:
+        from Avtar.avtar_config import save_avatar
+
+        custom_greeting = AVATAR_DIR / "greeting_custom_avatar.mp4"
+        if custom_greeting.exists():
+            try:
+                custom_greeting.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        default_image_id = os.getenv("DEFAULT_AVATAR_IMAGE_ID", "")
+        default_image_url = os.getenv("DEFAULT_AVATAR_IMAGE_URL", "")
+        save_avatar(
+            image_id=default_image_id,
+            image_url=default_image_url,
+            browser_url="/avatar-files/avtar_img.jpg",
+        )
+        return {
+            "success": True,
+            "browser_url": "/avatar-files/avtar_img.jpg",
+            "message": "Avatar reset to default.",
+        }
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err)) from err
+
+
+@app.get("/avatar/custom-info")
+def get_custom_avatar_info():
+    """Return current avatar config including whether a custom avatar is active."""
+    try:
+        from Avtar.avtar_config import get_avatar
+
+        cfg = get_avatar()
+        browser_url = cfg.get("browser_url", "/avatar-files/avtar_img.jpg")
+        is_custom = "custom_avatar" in browser_url
+        return {
+            "browser_url": browser_url,
+            "image_id": cfg.get("image_id"),
+            "image_url": cfg.get("image_url"),
+            "is_custom": is_custom,
+        }
+    except Exception as err:
+        return {
+            "browser_url": "/avatar-files/avtar_img.jpg",
+            "image_id": None,
+            "image_url": None,
+            "is_custom": False,
+            "error": str(err),
+        }
