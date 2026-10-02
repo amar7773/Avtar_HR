@@ -231,6 +231,11 @@ function App() {
   const handsFreeTimeoutRef = useRef(null);
   const isSubmittingVoiceRef = useRef(false);
   const voiceAbortControllerRef = useRef(null);
+  const ttsAbortControllerRef = useRef(null);
+  const greetingAbortControllerRef = useRef(null);
+  const sttAbortControllerRef = useRef(null);
+  const ttsAudioRef = useRef(null);
+  const currentAudioRequestIdRef = useRef(0);
   const shouldDiscardRecordingRef = useRef(false);
 
   // Fetch initial avatar image and custom status
@@ -461,14 +466,7 @@ function App() {
   };
 
   const logout = () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-    if (activeAudioRef.current) {
-      activeAudioRef.current.pause();
-      activeAudioRef.current = null;
-    }
+    stopAllAudio({ resetUI: true });
     localStorage.removeItem("employee_id");
     localStorage.removeItem("employee");
 
@@ -498,6 +496,10 @@ function App() {
   const sendMessage = async (text = message) => {
     if (!text?.trim() || loading || !employee) {
       return;
+    }
+
+    if (activeAudioRef.current || ttsAudioRef.current) {
+      stopAllAudio({ resetUI: false });
     }
 
     const userText = text.trim();
@@ -636,38 +638,45 @@ function App() {
     setMediaRecorder(null);
   };
 
-  const stopAllAvatarActivity = () => {
-    console.log("[VOICE-LIFECYCLE] Stopping all avatar and voice activity immediately...");
+  const stopAllAudio = (options = { resetUI: true }) => {
+    // Invalidate all pending asynchronous audio/voice callbacks
+    currentAudioRequestIdRef.current += 1;
     shouldDiscardRecordingRef.current = true;
     isSubmittingVoiceRef.current = false;
 
-    // 1. Abort any active in-flight /voice HTTP request
+    // 1. Abort any active in-flight fetch requests
     if (voiceAbortControllerRef.current) {
       try {
         voiceAbortControllerRef.current.abort();
       } catch {}
       voiceAbortControllerRef.current = null;
     }
-
-    // 2. Stop microphone tracks and recorder
-    stopRecording();
-
-    // 3. Clear hands-free timer
-    if (handsFreeTimeoutRef.current) {
-      clearTimeout(handsFreeTimeoutRef.current);
-      handsFreeTimeoutRef.current = null;
+    if (ttsAbortControllerRef.current) {
+      try {
+        ttsAbortControllerRef.current.abort();
+      } catch {}
+      ttsAbortControllerRef.current = null;
+    }
+    if (greetingAbortControllerRef.current) {
+      try {
+        greetingAbortControllerRef.current.abort();
+      } catch {}
+      greetingAbortControllerRef.current = null;
+    }
+    if (sttAbortControllerRef.current) {
+      try {
+        sttAbortControllerRef.current.abort();
+      } catch {}
+      sttAbortControllerRef.current = null;
     }
 
-    // 4. Cancel D-ID video polling
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-    pendingDidTalkIdRef.current = null;
-
-    // 5. Immediately halt active audio playback
+    // 2. Halt active Audio instance (speech-to-speech, greeting, avatar voice)
     if (activeAudioRef.current) {
       try {
+        activeAudioRef.current.onended = null;
+        activeAudioRef.current.onplay = null;
+        activeAudioRef.current.onpause = null;
+        activeAudioRef.current.onerror = null;
         activeAudioRef.current.pause();
         activeAudioRef.current.currentTime = 0;
         activeAudioRef.current.src = "";
@@ -675,23 +684,75 @@ function App() {
       activeAudioRef.current = null;
     }
 
-    // 6. Immediately halt active video playback
+    // 3. Halt TTS Audio instance
+    if (ttsAudioRef.current) {
+      try {
+        ttsAudioRef.current.onended = null;
+        ttsAudioRef.current.onplay = null;
+        ttsAudioRef.current.onpause = null;
+        ttsAudioRef.current.onerror = null;
+        ttsAudioRef.current.pause();
+        ttsAudioRef.current.currentTime = 0;
+        ttsAudioRef.current.src = "";
+      } catch {}
+      ttsAudioRef.current = null;
+    }
+
+    // 4. Halt any HTML5 <audio> elements in the DOM
+    try {
+      document.querySelectorAll("audio").forEach((el) => {
+        try {
+          el.pause();
+          el.currentTime = 0;
+        } catch {}
+      });
+    } catch {}
+
+    // 5. Halt D-ID video playback and polling
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    pendingDidTalkIdRef.current = null;
+
     if (avatarVideoRef.current) {
       try {
+        avatarVideoRef.current.onended = null;
         avatarVideoRef.current.pause();
         avatarVideoRef.current.currentTime = 0;
         delete avatarVideoRef.current.dataset.playingUrl;
       } catch {}
     }
-    setAvatarVideoUrl(null);
+    if (options?.resetUI) {
+      setAvatarVideoUrl(null);
+    }
 
-    // 7. Stop bridge lip-sync animation
+    // 6. Stop microphone tracks and recorder
+    stopRecording();
+
+    // 7. Clear hands-free timer and VAD timer
+    if (handsFreeTimeoutRef.current) {
+      clearTimeout(handsFreeTimeoutRef.current);
+      handsFreeTimeoutRef.current = null;
+    }
+    if (vadTimerRef.current) {
+      clearTimeout(vadTimerRef.current);
+      vadTimerRef.current = null;
+    }
+
+    // 8. Stop bridge lip-sync animation
     stopAudioLipSync();
 
-    // 8. Reset UI states
+    // 9. Reset UI states
     setHasActiveAudio(false);
     setVoiceLoading(false);
-    setAvatarState("idle");
+    if (options?.resetUI) {
+      setAvatarState("idle");
+    }
+  };
+
+  const stopAllAvatarActivity = () => {
+    stopAllAudio({ resetUI: true });
   };
 
   const startRecorder = async (onBlob, onBlobMode = "avatar_mode") => {
@@ -905,6 +966,8 @@ function App() {
   const startSTT = () =>
     startRecorder(async (audioBlob) => {
       setLoading(true);
+      const reqId = ++currentAudioRequestIdRef.current;
+      sttAbortControllerRef.current = new AbortController();
 
       try {
         const formData = new FormData();
@@ -920,8 +983,13 @@ function App() {
           {
             method: "POST",
             body: formData,
+            signal: sttAbortControllerRef.current.signal,
           }
         );
+
+        if (reqId !== currentAudioRequestIdRef.current || document.hidden) {
+          return;
+        }
 
         const data = await response.json();
 
@@ -929,6 +997,10 @@ function App() {
           throw new Error(
             data?.detail || "Speech recognition failed."
           );
+        }
+
+        if (reqId !== currentAudioRequestIdRef.current || document.hidden) {
+          return;
         }
 
         setMessage(data?.text || "");
@@ -943,20 +1015,31 @@ function App() {
           );
         }
       } catch (error) {
+        if (error.name === "AbortError") {
+          return;
+        }
         console.error("STT error:", error);
 
         notify(
           "Sorry, speech recognition failed."
         );
       } finally {
-        setLoading(false);
+        if (reqId === currentAudioRequestIdRef.current) {
+          setLoading(false);
+        }
       }
     });
 
   const generateSpeech = async (text) => {
-    if (!text?.trim() || voiceLoading) {
+    if (!text?.trim()) {
       return;
     }
+
+    // Stop previous audio immediately
+    stopAllAudio({ resetUI: false });
+
+    const reqId = ++currentAudioRequestIdRef.current;
+    ttsAbortControllerRef.current = new AbortController();
 
     try {
       setVoiceLoading(true);
@@ -971,6 +1054,7 @@ function App() {
           body: JSON.stringify({
             text,
           }),
+          signal: ttsAbortControllerRef.current.signal,
         }
       );
 
@@ -978,29 +1062,58 @@ function App() {
         throw new Error("Voice generation failed.");
       }
 
+      if (reqId !== currentAudioRequestIdRef.current || document.hidden) {
+        return;
+      }
+
       const blob = await response.blob();
+
+      if (reqId !== currentAudioRequestIdRef.current || document.hidden) {
+        return;
+      }
 
       if (audioUrl) {
         URL.revokeObjectURL(audioUrl);
       }
 
       const url = URL.createObjectURL(blob);
-
       setAudioUrl(url);
 
       const audio = new Audio(url);
+      audio.playbackRate = 1.0;
+      activeAudioRef.current = audio;
+      ttsAudioRef.current = audio;
 
-      audio.playbackRate = 0.9;
+      const cleanupTtsAudio = () => {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.onpause = null;
+        if (activeAudioRef.current === audio) {
+          activeAudioRef.current = null;
+        }
+        if (ttsAudioRef.current === audio) {
+          ttsAudioRef.current = null;
+        }
+        setVoiceLoading(false);
+      };
+
+      audio.onended = cleanupTtsAudio;
+      audio.onerror = cleanupTtsAudio;
 
       await audio.play();
     } catch (error) {
+      if (error.name === "AbortError") {
+        return;
+      }
       console.error("TTS error:", error);
 
       notify(
         "Sorry, voice playback failed."
       );
     } finally {
-      setVoiceLoading(false);
+      if (reqId === currentAudioRequestIdRef.current) {
+        setVoiceLoading(false);
+      }
     }
   };
 
@@ -1040,20 +1153,26 @@ function App() {
     }
   };
 
-  const pollAvatarVideo = (talkId) => {
-    if (!talkId || talkId === "None" || talkId === "null") return;
+  const pollAvatarVideo = (talkId, boundReqId) => {
+    const cleanId = String(talkId || "latest").trim();
+    if (!cleanId || cleanId === "None" || cleanId === "null") return;
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
     }
 
-    // Store which talk we are polling so we can abort stale polls
-    pendingDidTalkIdRef.current = talkId;
+    const targetReqId = boundReqId || currentAudioRequestIdRef.current;
+    pendingDidTalkIdRef.current = cleanId;
     let attempts = 0;
     const maxAttempts = 35; // 35 × 2 s = 70 s max
 
     pollIntervalRef.current = setInterval(async () => {
-      // If a newer request cancelled this poll, stop silently
-      if (pendingDidTalkIdRef.current !== talkId) {
+      // Abort immediately if request superseded, tab hidden, or left avatar page
+      if (
+        pendingDidTalkIdRef.current !== cleanId ||
+        targetReqId !== currentAudioRequestIdRef.current ||
+        activePageRef.current !== "avtar" ||
+        document.hidden
+      ) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
         return;
@@ -1061,7 +1180,7 @@ function App() {
 
       attempts += 1;
       try {
-        const response = await fetch(`${API_URL}/avatar/status/${talkId}`);
+        const response = await fetch(`${API_URL}/avatar/status/${encodeURIComponent(cleanId)}`);
         if (!response.ok) {
           throw new Error("Failed to check avatar status");
         }
@@ -1075,6 +1194,14 @@ function App() {
           const fullVideoUrl = statusData.video_url.startsWith("http")
             ? statusData.video_url
             : `${API_URL}${statusData.video_url}`;
+
+          if (
+            targetReqId !== currentAudioRequestIdRef.current ||
+            activePageRef.current !== "avtar" ||
+            document.hidden
+          ) {
+            return;
+          }
 
           // ── IMPERATIVE SWITCH ──────────────────────────────────────────────
           const vid = avatarVideoRef.current;
@@ -1162,20 +1289,27 @@ function App() {
   };
 
   const triggerGreeting = async () => {
-    try {
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-        pollIntervalRef.current = null;
-      }
-      if (activeAudioRef.current) {
-        activeAudioRef.current.pause();
-        activeAudioRef.current = null;
-      }
+    stopAllAudio({ resetUI: false });
+    const reqId = ++currentAudioRequestIdRef.current;
+    if (greetingAbortControllerRef.current) {
+      greetingAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    greetingAbortControllerRef.current = controller;
 
+    try {
       setAvatarState("greeting");
-      const res = await fetch(`${API_URL}/avatar/greeting`);
+      const res = await fetch(`${API_URL}/avatar/greeting`, { signal: controller.signal });
       if (!res.ok) throw new Error("Greeting request failed");
       const data = await res.json();
+
+      if (
+        reqId !== currentAudioRequestIdRef.current ||
+        activePageRef.current !== "avtar" ||
+        document.hidden
+      ) {
+        return;
+      }
 
       const greetingText =
         data.text ||
@@ -1205,17 +1339,45 @@ function App() {
         activeAudioRef.current = audio;
         setAvatarState("speaking");
         startAudioLipSync();
-        audio.onended = () => {
+
+        const cleanupGreetingAudio = () => {
+          audio.onended = null;
+          audio.onerror = null;
           stopAudioLipSync();
-          activeAudioRef.current = null;
+          if (activeAudioRef.current === audio) {
+            activeAudioRef.current = null;
+          }
+        };
+
+        audio.onerror = () => {
+          cleanupGreetingAudio();
+          if (reqId === currentAudioRequestIdRef.current) {
+            setAvatarState("idle");
+          }
+        };
+
+        audio.onended = () => {
+          cleanupGreetingAudio();
           console.log("[VOICE-AVATAR] Greeting audio finished.");
+          if (
+            reqId !== currentAudioRequestIdRef.current ||
+            activePageRef.current !== "avtar" ||
+            document.hidden
+          ) {
+            return;
+          }
           // In hands-free mode, start listening immediately after greeting!
-          if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+          if (handsFreeRef.current) {
             console.log("[VOICE-MIC] Starting microphone for user's first question...");
             setAvatarState("listening");
             if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
             handsFreeTimeoutRef.current = setTimeout(() => {
-              if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+              if (
+                handsFreeRef.current &&
+                activePageRef.current === "avtar" &&
+                !document.hidden &&
+                !isSubmittingVoiceRef.current
+              ) {
                 startVoiceAI("avatar_mode");
               }
             }, 450);
@@ -1223,25 +1385,38 @@ function App() {
             setAvatarState("idle");
           }
         };
+
         await audio
           .play()
-          .catch((e) => console.warn("Greeting audio play blocked:", e));
+          .catch((e) => {
+            console.warn("Greeting audio play blocked:", e);
+            cleanupGreetingAudio();
+            if (reqId === currentAudioRequestIdRef.current) {
+              setAvatarState("idle");
+            }
+          });
 
         if (data.talk_id) {
-          pollAvatarVideo(data.talk_id);
+          pollAvatarVideo(data.talk_id, reqId);
         }
       } else {
         setAvatarState("idle");
       }
     } catch (err) {
-      console.warn("Avatar greeting error:", err);
-      setAvatarState("idle");
+      if (err.name !== "AbortError") {
+        console.warn("Avatar greeting error:", err);
+      }
+      if (reqId === currentAudioRequestIdRef.current) {
+        setAvatarState("idle");
+      }
     }
   };
 
-  // 1. Completely stop voice detection & mic when user leaves the Avatar screen
+  // 1. Completely stop voice detection, audio & mic when user leaves any screen
   useEffect(() => {
     activePageRef.current = activePage;
+    stopAllAudio({ resetUI: true });
+
     if (activePage === "avtar") {
       console.log("[LIFECYCLE] Entered Talking Avatar page — triggering greeting & voice setup.");
       triggerGreeting();
@@ -1251,11 +1426,12 @@ function App() {
     }
   }, [activePage]);
 
-  // 2. Completely stop voice detection & mic when user switches browser tab or window loses focus
+  // 2. Completely stop audio, voice detection & mic when user switches browser tab or window loses focus
   useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
-        console.log("[LIFECYCLE] Browser tab hidden/inactive — stopping voice detection & mic.");
+        console.log("[LIFECYCLE] Browser tab hidden/inactive — stopping all audio & voice processing.");
+        stopAllAudio({ resetUI: false });
         stopAllAvatarActivity();
       } else {
         console.log("[LIFECYCLE] Browser tab resumed/active.");
@@ -1273,15 +1449,23 @@ function App() {
     };
     const handleWindowBlur = () => {
       if (document.hidden) {
+        stopAllAudio({ resetUI: false });
         stopAllAvatarActivity();
       }
     };
+    const handlePageHide = () => {
+      stopAllAudio({ resetUI: false });
+      stopAllAvatarActivity();
+    };
+
     document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("pagehide", handlePageHide);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("pagehide", handlePageHide);
     };
   }, []);
 
@@ -1300,17 +1484,8 @@ function App() {
       return;
     }
 
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-    if (activeAudioRef.current) {
-      try {
-        activeAudioRef.current.pause();
-      } catch {}
-      activeAudioRef.current = null;
-    }
-    setHasActiveAudio(false);
+    stopAllAudio({ resetUI: false });
+    const reqId = ++currentAudioRequestIdRef.current;
 
     if (mode === "avatar_mode") {
       setAvatarVideoUrl(null);
@@ -1318,6 +1493,16 @@ function App() {
     }
 
     return startRecorder(async (audioBlob) => {
+      if (
+        reqId !== currentAudioRequestIdRef.current ||
+        document.hidden ||
+        shouldDiscardRecordingRef.current ||
+        (mode === "avatar_mode" && activePageRef.current !== "avtar")
+      ) {
+        console.log("[VOICE-API] Discarding recording because state changed, request was superseded, or tab is hidden.");
+        return;
+      }
+
       console.log(`[VOICE-API] Submitting audio to backend (${audioBlob.size} bytes, mode: ${mode})...`);
       setVoiceLoading(true);
       if (mode === "avatar_mode") {
@@ -1352,13 +1537,14 @@ function App() {
 
         const data = await response.json();
 
-        // If user left avatar page or tab was hidden during processing, discard response immediately
+        // If request superseded, tab hidden, or left avatar page, discard response immediately
         if (
-          (mode === "avatar_mode" && activePageRef.current !== "avtar") ||
+          reqId !== currentAudioRequestIdRef.current ||
           document.hidden ||
-          shouldDiscardRecordingRef.current
+          shouldDiscardRecordingRef.current ||
+          (mode === "avatar_mode" && activePageRef.current !== "avtar")
         ) {
-          console.log("[VOICE-API] Discarding voice response because user left avatar page or tab is hidden.");
+          console.log("[VOICE-API] Discarding voice response because state changed or tab is hidden.");
           return;
         }
 
@@ -1403,6 +1589,14 @@ function App() {
           }
           stopAudioLipSync();
 
+          if (
+            reqId !== currentAudioRequestIdRef.current ||
+            activePageRef.current !== "avtar" ||
+            document.hidden
+          ) {
+            return;
+          }
+
           const avatarAudio = new Audio(url);
           activeAudioRef.current = avatarAudio;
           avatarAudio.playbackRate = 1.0;
@@ -1413,22 +1607,49 @@ function App() {
           avatarAudio.onplay = () => startAudioLipSync();
           avatarAudio.onpause = () => stopAudioLipSync();
 
-          setAvatarVideoUrl(null);
-
-          avatarAudio.onended = () => {
-            console.log("[VOICE-AVATAR] Audio response ended.");
+          const cleanupAvatarAudio = () => {
+            avatarAudio.onended = null;
+            avatarAudio.onerror = null;
+            avatarAudio.onplay = null;
+            avatarAudio.onpause = null;
             stopAudioLipSync();
             if (activeAudioRef.current === avatarAudio) {
               activeAudioRef.current = null;
               setHasActiveAudio(false);
             }
+          };
+
+          avatarAudio.onerror = () => {
+            cleanupAvatarAudio();
+            if (reqId === currentAudioRequestIdRef.current) {
+              setAvatarState("idle");
+            }
+          };
+
+          setAvatarVideoUrl(null);
+
+          avatarAudio.onended = () => {
+            cleanupAvatarAudio();
+            console.log("[VOICE-AVATAR] Audio response ended.");
+            if (
+              reqId !== currentAudioRequestIdRef.current ||
+              activePageRef.current !== "avtar" ||
+              document.hidden
+            ) {
+              return;
+            }
             // Continuous conversation loop: user can immediately speak again!
-            if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden) {
+            if (handsFreeRef.current) {
               console.log("[VOICE-MIC] Ready for next question — re-arming microphone...");
               setAvatarState("listening");
               if (handsFreeTimeoutRef.current) clearTimeout(handsFreeTimeoutRef.current);
               handsFreeTimeoutRef.current = setTimeout(() => {
-                if (handsFreeRef.current && activePageRef.current === "avtar" && !document.hidden && !isSubmittingVoiceRef.current) {
+                if (
+                  handsFreeRef.current &&
+                  activePageRef.current === "avtar" &&
+                  !document.hidden &&
+                  !isSubmittingVoiceRef.current
+                ) {
                   startVoiceAI("avatar_mode");
                 }
               }, 400);
@@ -1439,6 +1660,10 @@ function App() {
 
           avatarAudio.play().catch((e) => {
             console.warn("[VOICE-AVATAR] Audio autoplay restricted:", e);
+            cleanupAvatarAudio();
+            if (reqId === currentAudioRequestIdRef.current) {
+              setAvatarState("idle");
+            }
           });
 
           // Phase 2: poll for D-ID video in parallel
@@ -1446,7 +1671,7 @@ function App() {
             data?.avatar_talk_id ||
             data?.avatar?.talk_id ||
             "latest";
-          pollAvatarVideo(didTalkId);
+          pollAvatarVideo(didTalkId, reqId);
         } else {
           // --- VOICE MODE (Assistant tab) ---
           setLatestUserText(userText);
@@ -1459,10 +1684,34 @@ function App() {
             { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
           ]);
 
+          if (
+            reqId !== currentAudioRequestIdRef.current ||
+            document.hidden
+          ) {
+            return;
+          }
+
           const audio = new Audio(url);
           activeAudioRef.current = audio;
           audio.playbackRate = 1.0;
-          audio.play().catch((e) => console.warn("Audio autoplay blocked:", e));
+          setHasActiveAudio(true);
+
+          const cleanupVoiceAudio = () => {
+            audio.onended = null;
+            audio.onerror = null;
+            if (activeAudioRef.current === audio) {
+              activeAudioRef.current = null;
+              setHasActiveAudio(false);
+            }
+          };
+
+          audio.onended = cleanupVoiceAudio;
+          audio.onerror = cleanupVoiceAudio;
+
+          audio.play().catch((e) => {
+            console.warn("Audio autoplay blocked:", e);
+            cleanupVoiceAudio();
+          });
           setVoiceCompact(true);
         }
       } catch (error) {
@@ -1511,6 +1760,8 @@ function App() {
     ) {
       return;
     }
+
+    stopAllAudio({ resetUI: true });
 
     localStorage.removeItem(
       `chat_${employee.employee_id}`

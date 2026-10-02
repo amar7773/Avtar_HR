@@ -15,8 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi import HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -172,6 +171,14 @@ def home():
     }
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    favicon_path = PROJECT_ROOT / "frontend" / "public" / "favicon.svg"
+    if favicon_path.exists():
+        return FileResponse(favicon_path, media_type="image/svg+xml")
+    return Response(status_code=204)
+
+
 @app.post("/login")
 def login(request: LoginRequest):
 
@@ -269,12 +276,18 @@ async def voice(
             detail="The voice assistant could not generate an audio response."
         )
     avatar = result.get("avatar") or {}
+
+    try:
+        rel_audio_path = Path(response_audio).resolve().relative_to(VOICE_DIR.resolve()).as_posix()
+    except Exception:
+        rel_audio_path = Path(response_audio).name
+
     return {
         "mode": result.get("mode", mode),
         "language": result.get("language", "English"),
         "user_text": result.get("user_query", ""),
         "response": result.get("response", ""),
-        "audio_url": f"/voice-files/{Path(response_audio).name}",
+        "audio_url": f"/voice-files/{rel_audio_path}",
         "avatar": avatar,
         "avatar_status": avatar.get("status", "idle"),
         "avatar_talk_id": avatar.get("talk_id"),
@@ -282,15 +295,18 @@ async def voice(
     }
 
 
+@app.get("/avatar", include_in_schema=False)
+@app.get("/avatar/", include_in_schema=False)
+def avatar_root():
+    return get_avatar_info()
+
+
+@app.get("/avatar/status")
+@app.get("/avatar/status/")
 @app.get("/avatar/status/{talk_id}")
-def get_avatar_status(talk_id: str):
+def get_avatar_status(talk_id: str = "latest"):
     if not talk_id or talk_id.strip() in ("", "None", "null"):
-        return {
-            "status": "error",
-            "talk_id": talk_id,
-            "video_url": None,
-            "error": "Invalid talk ID.",
-        }
+        talk_id = "latest"
 
     if talk_id == "latest":
         latest = getattr(get_assistant(), "_latest_avatar_status", None)

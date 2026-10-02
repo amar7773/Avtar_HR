@@ -80,7 +80,8 @@ class LLMServices:
     def __init__(self):
 
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-        self.model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+        self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+        self.fallback_models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
 
         self.tools = [
             {
@@ -470,14 +471,26 @@ Rules:
 - Do not claim employee data was retrieved.
 """
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=300,
-        )
+        models_to_try = [self.model]
+        for fb in getattr(self, "fallback_models", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]):
+            if fb not in models_to_try:
+                models_to_try.append(fb)
 
-        text = self._response_text(response)
+        text = None
+        for m in models_to_try:
+            try:
+                response = self.client.chat.completions.create(
+                    model=m,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=300,
+                )
+                text = self._response_text(response)
+                if text:
+                    break
+            except Exception as e:
+                print(f"[LLM WARNING] Small talk error with model {m}: {e}")
+                continue
 
         if not text:
             if lang_mode == "Hindi":
@@ -602,69 +615,79 @@ Current date and time in India:
             {"role": "user", "content": query},
         ]
 
-        for _ in range(3):
+        models_to_try = [self.model]
+        for fb in getattr(self, "fallback_models", ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]):
+            if fb not in models_to_try:
+                models_to_try.append(fb)
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=self.tools,
-                temperature=0.45,
-                max_tokens=800,
-            )
+        for current_model in models_to_try:
+            try:
+                current_messages = list(messages)
+                tool_used = None
+                tool_result = None
 
-            message = response.choices[0].message
-            function_calls = message.tool_calls
+                for _ in range(3):
+                    response = self.client.chat.completions.create(
+                        model=current_model,
+                        messages=current_messages,
+                        tools=self.tools,
+                        temperature=0.45,
+                        max_tokens=800,
+                    )
 
-            if not function_calls:
-                text = self._response_text(response)
-                if text:
-                    return {
-                        "type": "message",
-                        "response": text,
-                        "tool_used": tool_used,
-                        "tool_result": tool_result,
-                    }
-                break
+                    message = response.choices[0].message
+                    function_calls = message.tool_calls
 
-            messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                    for tool_call in function_calls
-                ],
-            })
+                    if not function_calls:
+                        text = self._response_text(response)
+                        if text:
+                            return {
+                                "type": "message",
+                                "response": text,
+                                "tool_used": tool_used,
+                                "tool_result": tool_result,
+                            }
+                        break
 
-            for tool_call in function_calls:
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": message.content,
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments,
+                                },
+                            }
+                            for tool_call in function_calls
+                        ],
+                    })
 
-                function_name = tool_call.function.name
+                    for tool_call in function_calls:
+                        function_name = tool_call.function.name
+                        try:
+                            arguments = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
 
-                try:
-                    arguments = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
+                        result = self._run_tool(function_name, arguments, employee_id=employee_id)
+                        if result is None:
+                            continue
 
-                result = self._run_tool(function_name, arguments, employee_id=employee_id)
+                        tool_used = function_name
+                        tool_result = result
 
-                if result is None:
-                    continue
-
-                tool_used = function_name
-                tool_result = result
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": function_name,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+                        current_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": function_name,
+                            "content": json.dumps(result, ensure_ascii=False, default=str),
+                        })
+            except Exception as e:
+                print(f"[LLM WARNING] Chat completion error with {current_model}: {e}")
+                continue
 
         # Human-friendly fallback error messages in all 3 languages
         if lang_mode == "Hindi":

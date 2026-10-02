@@ -203,7 +203,16 @@ class AssistantService:
         if not user_text or not user_text.strip():
             return self._stt_error_response(stt_lang, mode)
 
-        result = self.process(user_query=user_text.strip(), employee_id=employee_id)
+        try:
+            result = self.process(user_query=user_text.strip(), employee_id=employee_id)
+        except Exception as proc_err:
+            print(f"[ASSISTANT ERROR] Error processing query: {proc_err}")
+            result = {
+                "user_query": user_text.strip(),
+                "response": "I apologize, but I am having trouble processing your request right now. Please try again in a moment.",
+                "language": detect_language_mode(user_text.strip(), hint=stt_lang),
+            }
+
         detected_lang = result.get("language") or detect_language_mode(user_text.strip(), hint=stt_lang)
         result["language"] = detected_lang
 
@@ -217,11 +226,16 @@ class AssistantService:
                 response_text = "I couldn't process your request, please ask again."
         result["response"] = response_text
 
-        response_audio = self.tts_service.generate_speech(
-            text=response_text,
-            output_file=str(self._new_resp_file()),
-        )
-        self._cleanup_old_voice_files()
+        try:
+            response_audio = self.tts_service.generate_speech(
+                text=response_text,
+                output_file=str(self._new_resp_file()),
+            )
+            self._cleanup_old_voice_files()
+        except Exception as tts_err:
+            print(f"[ASSISTANT ERROR] TTS generation error: {tts_err}")
+            fallback_greeting = self.voice_dir / "greeting.mp3"
+            response_audio = str(fallback_greeting if fallback_greeting.exists() else audio_file)
 
         result["mode"] = mode
         result["input_audio"] = audio_file
