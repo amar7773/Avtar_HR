@@ -76,17 +76,11 @@ class DIDService:
         self._validate_did_url(image_url, "D-ID image URL")
         return {"image_id": image_id, "image_url": image_url}
 
-    _audios_endpoint_forbidden = False
-
     def upload_audio(self, audio_path):
         audio_path = Path(audio_path)
         if audio_path.resolve() != CANONICAL_RESPONSE_AUDIO.resolve():
             raise ValueError("D-ID response audio must be Voice/ai_response.mp3.")
         TTSService.validate_mp3(audio_path)
-        if DIDService._audios_endpoint_forbidden:
-            raise RuntimeError(
-                "D-ID audio upload permission failure with HTTP 403: Forbidden (account endpoint permission restricted)."
-            )
         audio_hash = hashlib.sha256(audio_path.read_bytes()).hexdigest()
         filename = audio_path.name
         with open(audio_path, "rb") as audio_file:
@@ -95,11 +89,9 @@ class DIDService:
                 headers=self.headers,
                 auth=self.auth,
                 files={"audio": (filename, audio_file, "audio/mpeg")},
-                timeout=4,
+                timeout=60,
             )
         if response.status_code != 201:
-            if response.status_code == 403:
-                DIDService._audios_endpoint_forbidden = True
             failure_kind = {
                 400: "invalid audio/request",
                 401: "authentication",
@@ -367,7 +359,7 @@ class DIDService:
             headers={**self.headers, "Content-Type": "application/json"},
             auth=self.auth,
             json=payload,
-            timeout=4,
+            timeout=30,
         )
         if response.status_code not in (200, 201):
             raise RuntimeError(

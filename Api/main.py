@@ -445,20 +445,17 @@ def get_avatar_info():
 
 @app.get("/avatar/greeting")
 def get_avatar_greeting():
-    import time
     from Avtar.avtar_config import get_avatar
     cfg = get_avatar()
     is_custom = "custom_avatar" in cfg.get("browser_url", "")
     greeting_text = "Hi, I am your AI employee assistant. How can I help you today?"
     greeting_video_path = AVATAR_DIR / "greeting_avatar.mp4"
-    ts = int(time.time() * 1000)
 
-    # For instant start, return pre-rendered greeting_avatar.mp4 with fresh timestamp
-    if greeting_video_path.is_file() and greeting_video_path.stat().st_size > 10000:
+    # For default avatar, reuse pre-rendered greeting_avatar.mp4 for instant start
+    if not is_custom and greeting_video_path.is_file() and greeting_video_path.stat().st_size > 10000:
         return {
             "text": greeting_text,
-            "video_url": f"/avatar-files/{greeting_video_path.name}?t={ts}",
-            "audio_url": f"/avatar-files/{greeting_video_path.name}?t={ts}",
+            "video_url": f"/avatar-files/{greeting_video_path.name}?v=greeting",
             "status": "ready",
             "talk_id": None,
             "quick_options": [
@@ -478,40 +475,16 @@ def get_avatar_greeting():
                 text=greeting_text,
                 output_file=str(response_audio_path),
             )
-            avatar_res = {}
-            if hasattr(assistant_service, "start_avatar"):
-                try:
-                    avatar_res = assistant_service.start_avatar(
-                        audio_path, greeting_text
-                    )
-                except Exception:
-                    avatar_res = {}
-            return {
-                "text": greeting_text,
-                "video_url": avatar_res.get("video_url") or f"/avatar-files/greeting_avatar.mp4?t={ts}",
-                "audio_url": f"/voice-files/{response_audio_path.name}?t={ts}",
-                "status": avatar_res.get("status") or "ready",
-                "talk_id": avatar_res.get("talk_id"),
-                "quick_options": [
-                    {"label": "📅 My attendance", "query": "Show my attendance"},
-                    {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
-                    {"label": "👤 My profile", "query": "Show my complete employee profile details"},
-                ],
-            }
+            avatar = assistant_service.start_avatar(audio_path, greeting_text)
+            if avatar.get("talk_id"):
+                global latest_active_talk_id
+                with active_talk_id_lock:
+                    latest_active_talk_id = avatar["talk_id"]
     except Exception as error:
-        return {
-            "text": greeting_text,
-            "video_url": None,
-            "audio_url": None,
-            "status": "idle",
-            "talk_id": None,
-            "error": str(error),
-            "quick_options": [
-                {"label": "📅 My attendance", "query": "Show my attendance"},
-                {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
-                {"label": "👤 My profile", "query": "Show my complete employee profile details"},
-            ],
-        }
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not generate the D-ID greeting: {error}",
+        ) from error
 
     return {
         "text": greeting_text,

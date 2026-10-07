@@ -180,19 +180,10 @@ class AssistantService:
                             response_text=response_text,
                         )
                     except Exception as err:
-                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using fast synchronized audio fallback.")
-                        avatar_info = {
-                            "status": "fallback",
-                            "is_stream": False,
-                            "audio_file": str(response_audio),
-                            "error": str(err),
-                        }
+                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using standard avatar fallback.")
+                        avatar_info = self.start_avatar(response_audio, response_text)
                 else:
-                    avatar_info = {
-                        "status": "fallback",
-                        "is_stream": False,
-                        "audio_file": str(response_audio),
-                    }
+                    avatar_info = self.start_avatar(response_audio, response_text)
 
         result["mode"] = mode
         result["input_audio"] = audio_file
@@ -223,19 +214,10 @@ class AssistantService:
                             response_text=response_text,
                         )
                     except Exception as err:
-                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using fast synchronized audio fallback.")
-                        avatar_info = {
-                            "status": "fallback",
-                            "is_stream": False,
-                            "audio_file": str(response_audio),
-                            "error": str(err),
-                        }
+                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using standard avatar fallback.")
+                        avatar_info = self.start_avatar(response_audio, response_text)
                 else:
-                    avatar_info = {
-                        "status": "fallback",
-                        "is_stream": False,
-                        "audio_file": str(response_audio),
-                    }
+                    avatar_info = self.start_avatar(response_audio, response_text)
             result["response_audio"] = response_audio
             result["avatar"] = avatar_info
         else:

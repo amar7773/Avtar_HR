@@ -237,7 +237,7 @@ function App() {
     { label: "👤 My profile", query: "Show my complete employee profile details" },
   ]);
   const [floatingAvatarOpen, setFloatingAvatarOpen] = useState(() => {
-    return sessionStorage.getItem("floating_avatar_open") !== "false";
+    return sessionStorage.getItem("floating_avatar_open") === "true";
   });
   const floatingAvatarOpenRef = useRef(floatingAvatarOpen);
   const [floatingPanelInput, setFloatingPanelInput] = useState("");
@@ -671,6 +671,9 @@ function App() {
     if (activeAudioRef.current || ttsAudioRef.current) {
       stopAllAudio({ resetUI: false });
     }
+    if (!hasStreamVideo) {
+      setAvatarVideoUrl(null);
+    }
 
     const reqId = ++currentAudioRequestIdRef.current;
     const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -710,14 +713,15 @@ function App() {
       if (reqId !== currentAudioRequestIdRef.current) return;
 
       const aiResponse = data.response || "I processed your request.";
+      setLatestAiResponse(aiResponse);
+
+      setFloatingMessages((prev) => [
+        ...prev,
+        { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
+      ]);
 
       if (data.stream_talk) {
         setAvatarState("speaking");
-        setLatestAiResponse(aiResponse);
-        setFloatingMessages((prev) => [
-          ...prev,
-          { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
-        ]);
         const estSec = Math.max(3, Math.min(45, Math.ceil(aiResponse.length / 10)));
         if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
         speechFallbackTimeoutRef.current = setTimeout(() => {
@@ -731,56 +735,25 @@ function App() {
         if (talkId && typeof talkId === "string" && talkId.startsWith("tlk_")) {
           setAvatarVideoUrl(null);
           setAvatarState("preparing");
-          setLatestAiResponse(aiResponse);
-          setFloatingMessages((prev) => [
-            ...prev,
-            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
-          ]);
           pollAvatarVideo(talkId, reqId);
         } else if (data.audio_url) {
           const fullAudio = data.audio_url.startsWith("http") ? data.audio_url : `${API_URL}${data.audio_url}`;
           const audio = new Audio(fullAudio);
           activeAudioRef.current = audio;
-
-          // Continuous lip-sync facial movement loop during speech
-          setAvatarVideoUrl(`${API_URL}/avatar-files/response_avatar.mp4?t=${Date.now()}`);
-
-          let messageRendered = false;
-          const syncStartSpeaking = () => {
-            if (!messageRendered && currentAudioRequestIdRef.current === reqId) {
-              messageRendered = true;
-              setAvatarState("speaking");
-              setLatestAiResponse(aiResponse);
-              setFloatingMessages((prev) => [
-                ...prev,
-                { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
-              ]);
-            }
-          };
-
-          audio.onplay = syncStartSpeaking;
+          setAvatarState("speaking");
 
           const cleanupAudio = () => {
             audio.onended = null;
             audio.onerror = null;
-            audio.onplay = null;
-            syncStartSpeaking();
             if (activeAudioRef.current === audio) activeAudioRef.current = null;
-            setAvatarVideoUrl(null);
             setAvatarState("idle");
             setVoiceLoading(false);
           };
           audio.onended = cleanupAudio;
           audio.onerror = cleanupAudio;
-          audio.play().then(syncStartSpeaking).catch(cleanupAudio);
+          audio.play().catch(cleanupAudio);
         } else {
           setAvatarState("idle");
-          setVoiceLoading(false);
-          setLatestAiResponse(aiResponse);
-          setFloatingMessages((prev) => [
-            ...prev,
-            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
-          ]);
         }
         if (data.avatar_error || data?.avatar?.error) {
           notify(`Avatar: ${data.avatar_error || data?.avatar?.error}`);
@@ -983,8 +956,9 @@ function App() {
   const handleOpenFloatingAvatar = () => {
     setFloatingAvatarOpen(true);
     floatingAvatarOpenRef.current = true;
+    isGreetingActiveRef.current = true;
     isVoiceConversationActiveRef.current = false;
-    if (!avatarVideoUrl && avatarState === "idle") {
+    if (!floatingMessages || floatingMessages.length === 0) {
       triggerGreeting();
     }
   };
@@ -1004,15 +978,9 @@ function App() {
   };
 
   const handleRefreshAvatarSession = () => {
-    stopAllAudio({ resetUI: false });
-    if (speechFallbackTimeoutRef.current) {
-      clearTimeout(speechFallbackTimeoutRef.current);
-      speechFallbackTimeoutRef.current = null;
-    }
+    stopAllAvatarActivity();
     isGreetingActiveRef.current = true;
     isVoiceConversationActiveRef.current = false;
-    setRecording(false);
-    setVoiceLoading(false);
     clearFloatingChat();
     triggerGreeting();
   };
@@ -1497,7 +1465,7 @@ function App() {
 
     try {
       setAvatarState("greeting");
-      const res = await fetch(`${API_URL}/avatar/greeting?t=${Date.now()}`, { signal: controller.signal });
+      const res = await fetch(`${API_URL}/avatar/greeting`, { signal: controller.signal });
       if (!res.ok) {
         const errorBody = await res.json().catch(() => ({}));
         throw new Error(errorBody.detail || "Greeting request failed.");
@@ -1544,16 +1512,6 @@ function App() {
       }
     }
   };
-
-  // Initial load: automatically play greeting for the avatar
-  const initialGreetingDoneRef = useRef(false);
-  useEffect(() => {
-    if (!initialGreetingDoneRef.current) {
-      initialGreetingDoneRef.current = true;
-      console.log("[LIFECYCLE] Initial mount — automatically triggering avatar greeting.");
-      triggerGreeting();
-    }
-  }, []);
 
   // 1. Completely stop voice detection, audio & mic when user leaves any screen
   useEffect(() => {
@@ -1704,10 +1662,12 @@ function App() {
         if (mode === "avatar_mode") {
           const didTalkId = data?.avatar_talk_id || data?.avatar?.talk_id;
           setLatestUserText(userText);
+          setLatestAiResponse(aiResponse);
 
           setFloatingMessages((prev) => [
             ...prev,
             { id: Date.now(), role: "user", content: userText, time: now, voice: true },
+            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
           ]);
 
           if (
@@ -1719,11 +1679,6 @@ function App() {
 
           if (data?.stream_talk) {
             setAvatarState("speaking");
-            setLatestAiResponse(aiResponse);
-            setFloatingMessages((prev) => [
-              ...prev,
-              { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
-            ]);
             const estSec = Math.max(3, Math.min(45, Math.ceil(aiResponse.length / 10)));
             if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
             speechFallbackTimeoutRef.current = setTimeout(() => {
@@ -1736,11 +1691,6 @@ function App() {
           } else if (typeof didTalkId === "string" && didTalkId.startsWith("tlk_")) {
             setAvatarVideoUrl(null);
             setAvatarState("preparing");
-            setLatestAiResponse(aiResponse);
-            setFloatingMessages((prev) => [
-              ...prev,
-              { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
-            ]);
             pollAvatarVideo(didTalkId, reqId);
           } else {
             if (data?.audio_url) {
@@ -1749,28 +1699,12 @@ function App() {
               activeAudioRef.current = audio;
 
               // Real-time visible lip-sync & facial movement loop during speech
-              setAvatarVideoUrl(`${API_URL}/avatar-files/response_avatar.mp4?t=${Date.now()}`);
-
-              let msgRendered = false;
-              const syncStartSpeaking = () => {
-                if (!msgRendered && currentAudioRequestIdRef.current === reqId) {
-                  msgRendered = true;
-                  setAvatarState("speaking");
-                  setLatestAiResponse(aiResponse);
-                  setFloatingMessages((prev) => [
-                    ...prev,
-                    { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
-                  ]);
-                }
-              };
-
-              audio.onplay = syncStartSpeaking;
+              setAvatarVideoUrl(`${API_URL}/avatar-files/response_avatar.mp4?v=${Date.now()}`);
+              setAvatarState("speaking");
 
               const cleanupVoiceAudio = () => {
                 audio.onended = null;
                 audio.onerror = null;
-                audio.onplay = null;
-                syncStartSpeaking();
                 if (activeAudioRef.current === audio) activeAudioRef.current = null;
                 setAvatarVideoUrl(null);
                 setAvatarState("idle");
@@ -1778,15 +1712,10 @@ function App() {
               };
               audio.onended = cleanupVoiceAudio;
               audio.onerror = cleanupVoiceAudio;
-              audio.play().then(syncStartSpeaking).catch(cleanupVoiceAudio);
+              audio.play().catch(cleanupVoiceAudio);
             } else {
               setAvatarVideoUrl(null);
               setAvatarState("idle");
-              setLatestAiResponse(aiResponse);
-              setFloatingMessages((prev) => [
-                ...prev,
-                { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
-              ]);
             }
             if (data?.avatar_error || data?.avatar?.error) {
               notify(`Avatar: ${data.avatar_error || data?.avatar?.error}`);
@@ -2468,19 +2397,19 @@ function AvtarPage({
     if (avatarVideoUrl && videoRef.current) {
       videoRef.current.currentTime = 0;
       videoRef.current.volume = 1.0;
-      const isLoopLipSync = typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4");
-      videoRef.current.muted = isLoopLipSync;
-      videoRef.current.loop = isLoopLipSync;
-      setIsMuted(isLoopLipSync);
+      videoRef.current.muted = false;
+      videoRef.current.loop = false;
+      setIsMuted(false);
       const playPromise = videoRef.current.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
-          console.warn("Avatar video autoplay restricted:", err);
+          console.warn("D-ID video autoplay restricted:", err);
           if (videoRef.current) {
             videoRef.current.muted = true;
             setIsMuted(true);
             videoRef.current.play().catch((playError) => {
-              console.error("Avatar video playback failed:", playError);
+              console.error("D-ID video playback failed:", playError);
+              notify?.("The generated avatar video could not be played.");
             });
           }
         });
@@ -2646,42 +2575,16 @@ function AvtarPage({
           >
             <div className="avatar-ambient-halo" />
 
-            {/* Baseline Image Layer - Always rendered behind video to guarantee continuous avatar */}
-            {!hasStreamVideo && (
-              <img
-                className="avatar-image"
-                src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
-                alt="Avtar - AI Employee Assistant"
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  objectPosition: "center top",
-                  zIndex: 1,
-                }}
-                onError={(e) => {
-                  if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
-                    e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
-                  }
-                }}
-              />
-            )}
-
             <video
               ref={videoRef}
               className={`avatar-video ${(hasStreamVideo || avatarVideoUrl) ? "has-video" : "video-hidden"}`}
               src={avatarVideoUrl || undefined}
-              poster={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
               autoPlay
               playsInline
-              muted={isMuted || (typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4"))}
-              loop={Boolean(avatarVideoUrl && typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4"))}
+              muted={isMuted}
+              loop={false}
               onEnded={handleVideoEnded}
               style={{
-                position: "relative",
-                zIndex: 2,
                 display: (hasStreamVideo || avatarVideoUrl) ? "block" : "none",
                 width: "100%",
                 height: "100%",
@@ -2689,11 +2592,10 @@ function AvtarPage({
                 objectPosition: "center top",
               }}
             />
-            {isMuted && avatarVideoUrl && !avatarVideoUrl.includes("response_avatar.mp4") && (
+            {isMuted && avatarVideoUrl && (
               <button
                 type="button"
                 className="avatar-unmute-overlay-btn"
-                style={{ zIndex: 3 }}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (videoRef.current) {
@@ -2705,6 +2607,18 @@ function AvtarPage({
               >
                 🔊 Unmute
               </button>
+            )}
+            {(!hasStreamVideo && !avatarVideoUrl) && (
+              <img
+                className="avatar-image"
+                src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+                alt="Avtar - AI Employee Assistant"
+                onError={(e) => {
+                  if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
+                    e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+                  }
+                }}
+              />
             )}
 
             {status.className === "listening" && (
@@ -2997,7 +2911,7 @@ function FloatingAvatarPanel({
       videoRef.current.volume = 1.0;
       const isLoopLipSync = typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4");
       videoRef.current.muted = isLoopLipSync;
-      videoRef.current.loop = isLoopLipSync;
+      videoRef.current.loop = false;
       setIsMuted(isLoopLipSync);
 
       const p = videoRef.current.play();
@@ -3015,26 +2929,6 @@ function FloatingAvatarPanel({
       avatarStreamService.attachVideo(videoRef.current);
     }
   }, [avatarVideoUrl, hasStreamVideo, avatarState]);
-
-  // First user interaction automatically unmutes greeting video if browser restricted audio autoplay
-  useEffect(() => {
-    const handleFirstUserInteraction = () => {
-      if (videoRef.current && avatarState === "greeting" && isMuted) {
-        videoRef.current.muted = false;
-        videoRef.current.volume = 1.0;
-        setIsMuted(false);
-        if (videoRef.current.paused) {
-          videoRef.current.play().catch(() => {});
-        }
-      }
-    };
-    window.addEventListener("pointerdown", handleFirstUserInteraction, { once: true });
-    window.addEventListener("keydown", handleFirstUserInteraction, { once: true });
-    return () => {
-      window.removeEventListener("pointerdown", handleFirstUserInteraction);
-      window.removeEventListener("keydown", handleFirstUserInteraction);
-    };
-  }, [avatarState, isMuted]);
 
   // Clamped dragging handlers
   const handleHeaderPointerDown = (e) => {
@@ -3237,42 +3131,16 @@ function FloatingAvatarPanel({
             >
               <div className="avatar-ambient-halo" />
 
-              {/* Baseline Image Layer - Always rendered behind video to guarantee continuous avatar */}
-              {!hasStreamVideo && (
-                <img
-                  className="avatar-image"
-                  src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
-                  alt="Avtar - AI Employee Assistant"
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                    objectPosition: "center top",
-                    zIndex: 1,
-                  }}
-                  onError={(e) => {
-                    if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
-                      e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
-                    }
-                  }}
-                />
-              )}
-
               <video
                 ref={videoRef}
                 className={`avatar-video ${(hasStreamVideo || avatarVideoUrl) ? "has-video" : "video-hidden"}`}
                 src={avatarVideoUrl || undefined}
-                poster={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
                 autoPlay
                 playsInline
-                muted={isMuted || (typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4"))}
-                loop={Boolean(avatarVideoUrl && typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4"))}
+                muted={avatarState === "speaking" && typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4")}
+                loop={false}
                 onEnded={onVideoEnded}
                 style={{
-                  position: "relative",
-                  zIndex: 2,
                   display: (hasStreamVideo || avatarVideoUrl) ? "block" : "none",
                   width: "100%",
                   height: "100%",
@@ -3284,7 +3152,6 @@ function FloatingAvatarPanel({
                 <button
                   type="button"
                   className="avatar-unmute-overlay-btn"
-                  style={{ zIndex: 3 }}
                   onClick={(e) => {
                     e.stopPropagation();
                     if (videoRef.current) {
@@ -3297,6 +3164,18 @@ function FloatingAvatarPanel({
                 >
                   🔊 Unmute
                 </button>
+              )}
+              {(!hasStreamVideo && !avatarVideoUrl) && (
+                <img
+                  className="avatar-image"
+                  src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+                  alt="Avtar - AI Employee Assistant"
+                  onError={(e) => {
+                    if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
+                      e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+                    }
+                  }}
+                />
               )}
 
               {status.className === "listening" && (
