@@ -1,82 +1,52 @@
-import os
-import time
-import requests
-from dotenv import load_dotenv
+import hashlib
+from pathlib import Path
 
-load_dotenv()
-DID_API_KEY =os.getenv("API_DI_ID")
-IMAGE_URL = (
-    "s3://d-id-images-prod/"
-    "google-oauth2|113587619454688211094/"
-    "img_pDEPifk2LR46TtqPo8UeU/"
-    "avtar_img.jpg"
+from Avtar.DID_Servicee import DIDService
+from Avtar.avtar_config import get_avatar
+from Voice.Tts import TTSService
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+AUDIO_FILE = PROJECT_ROOT / "Voice" / "ai_response.mp3"
+VIDEO_FILE = PROJECT_ROOT / "Avtar" / "did_lipsync_test.mp4"
+TEST_RESPONSE = (
+    "Great news. This is the current response for verifying D-ID lip-sync "
+    "and a happy facial reaction."
 )
-AUDIO_FILE="Voice/api_response.mp3"
 
-with open(AUDIO_FILE,"rb") as audio_file:
-    response=requests.post(
-        "https://api.d-id.com/audios",
-        headers={
-            "Authorization":f"Basic {DID_API_KEY}"
-        },
-        files={
-            "audio":audio_file
-        }
+
+def main():
+    tts = TTSService()
+    generated_audio = Path(
+        tts.generate_speech(TEST_RESPONSE, output_file=str(AUDIO_FILE))
+    ).resolve()
+    if generated_audio != AUDIO_FILE.resolve():
+        raise RuntimeError(f"TTS wrote to an unexpected path: {generated_audio}")
+    audio_hash = tts.validate_generated_speech(TEST_RESPONSE, AUDIO_FILE)
+    print(f"Validated canonical response audio: {AUDIO_FILE} ({audio_hash})")
+
+    avatar = get_avatar()
+    image_url = avatar.get("image_url")
+    if not image_url:
+        raise ValueError("No active D-ID avatar image is configured.")
+
+    did = DIDService()
+    talk = did.start_talking_avatar_from_audio(
+        image_url=image_url,
+        audio_path=str(AUDIO_FILE),
+        expression=did.expression_for_response(TEST_RESPONSE),
     )
-print("Audio Upload Status:", response.status_code)
-if response.status_code != 201:
-    print(response.text)
-    raise Exception("Audio upload failed.")
-audio_data=response.json()
-audio_url=audio_data["url"]
-print("Audio URL:")
-print(audio_url)
-payload={
-    "source_url":IMAGE_URL,
-    "script":{
-        "type":"audio",
-        "audio_url":audio_url
-    }
-}
-response=requests.post(
-    "https://api.d-id.com/talks",
-    headers={
-        "Authorization": f"Basic {DID_API_KEY}",
-        "Content-Type": "application/json"
-    },
-    json=payload
-)
-print("\nTalk Creation Status:", response.status_code)
-print(response.text)
-if response.status_code not in [200, 201, 202]:
-    raise Exception("Avatar creation failed.")
-talk_id = response.json()["id"]
-print("\nTalk ID:", talk_id)
+    if talk["audio_sha256"] != audio_hash:
+        raise RuntimeError("The D-ID upload did not match the current response MP3.")
 
-while True:
-    time.sleep(5)
-    status_response=requests.get(
-        f"https://api.d-id.com/talks/{talk_id}",
-        headers={
-            "Authorization": f"Basic {DID_API_KEY}"
-        })
-    data = status_response.json()
+    talk_id = talk["talk_id"]
+    print(f"D-ID talk ID: {talk_id}")
+    result_url = did.wait_for_video(talk_id)
+    did.download_video(result_url, VIDEO_FILE)
+    video_hash = hashlib.sha256(VIDEO_FILE.read_bytes()).hexdigest()
+    print(f"Validated D-ID MP4: {VIDEO_FILE} ({video_hash})")
+    print("The MP4 contains D-ID-generated audio and video; no audio replacement was applied.")
 
-    print("Status:", data.get("status"))
 
-    if data.get("status")=="done":
-        vedio_url=data.get("result_url")
-        print("vedio_url:")
-        print(vedio_url)
-        vedio_response=requests.get(vedio_url)
-        if vedio_response.status_code != 200:
-            raise Exception("Video download failed.")
-        with open("Avtar/generated_avatar.mp4","wb") as vedio_file:
-            vedio_file.write(vedio_response.content)
-        print("\n✅ Video saved successfully:")
-        print("Avtar/generated_avatar.mp4")
-        break
-    if data.get("status") == "error":
-        print("\nError:")
-        print(data)
-        break
+if __name__ == "__main__":
+    main()

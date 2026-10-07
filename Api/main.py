@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 from uuid import uuid4
+import re
 
 # Ensure Windows terminal doesn't crash on Devanagari or Unicode prints
 if hasattr(sys.stdout, "reconfigure"):
@@ -15,12 +16,17 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from threading import Lock
+from Voice.response_audio_lock import lock_response_audio
+
+active_talk_id_lock = Lock()
+latest_active_talk_id = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -116,10 +122,34 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     user_query: str
     employee_id: str
+    mode: str = "text_mode"
+    stream_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class TTSRequest(BaseModel):
     text: str
+
+
+class StreamSdpRequest(BaseModel):
+    stream_id: str
+    session_id: str
+    answer: dict
+
+
+class StreamIceRequest(BaseModel):
+    stream_id: str
+    session_id: str
+    candidate: str
+    sdp_mid: Optional[str] = None
+    sdp_mline_index: Optional[int] = None
+
+
+class StreamTalkRequest(BaseModel):
+    stream_id: str
+    session_id: str
+    text: Optional[str] = None
+    audio_url: Optional[str] = None
 
 
 def save_upload(upload: UploadFile) -> Path:
@@ -192,6 +222,33 @@ def login(request: LoginRequest):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    if request.mode == "avatar_mode":
+        result = get_assistant().process_text(
+            user_query=request.user_query,
+            employee_id=request.employee_id,
+            mode="avatar_mode",
+            stream_id=request.stream_id,
+            session_id=request.session_id,
+        )
+        avatar = result.get("avatar") or {}
+        if avatar.get("talk_id"):
+            global latest_active_talk_id
+            with active_talk_id_lock:
+                latest_active_talk_id = avatar["talk_id"]
+
+        return {
+            "mode": "avatar_mode",
+            "language": result.get("language", "English"),
+            "user_text": request.user_query,
+            "response": result.get("response", ""),
+            "audio_url": f"/voice-files/ai_response.mp3?v={uuid4().hex}",
+            "avatar": avatar,
+            "avatar_status": avatar.get("status", "idle"),
+            "avatar_talk_id": avatar.get("talk_id"),
+            "avatar_video_url": avatar.get("video_url"),
+            "avatar_error": avatar.get("error"),
+            "stream_talk": bool(avatar.get("is_stream")),
+        }
 
     result = get_assistant().process(
         user_query=request.user_query,
@@ -211,15 +268,20 @@ def text_to_speech(request: TTSRequest):
             detail="Text is required."
         )
 
-    audio_file = get_assistant().tts_service.generate_speech(
-        text=text,
-        output_file=str(VOICE_DIR / "api_response.mp3")
-    )
+    assistant_service = get_assistant()
+    with assistant_service._audio_pipeline_lock, lock_response_audio(
+        VOICE_DIR / "ai_response.mp3"
+    ):
+        audio_file = assistant_service.tts_service.generate_speech(
+            text=text,
+            output_file=str(VOICE_DIR / "ai_response.mp3"),
+        )
 
     return FileResponse(
         path=audio_file,
         media_type="audio/mpeg",
-        filename="ai_response.mp3"
+        filename="ai_response.mp3",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
 
@@ -247,7 +309,9 @@ async def speech_to_text(audio: UploadFile = File(...)):
 async def voice(
     audio: UploadFile = File(...),
     employee_id: str = Form(...),
-    mode: str = Form(default="avatar_mode")
+    mode: str = Form(default="avatar_mode"),
+    stream_id: Optional[str] = Form(default=None),
+    session_id: Optional[str] = Form(default=None),
 ):
 
     input_audio_path = save_upload(audio)
@@ -259,7 +323,9 @@ async def voice(
         result = get_assistant().process_speech_to_speech(
             audio_file=str(input_audio_path),
             employee_id=employee_id,
-            mode=mode
+            mode=mode,
+            stream_id=stream_id,
+            session_id=session_id,
         )
     except Exception as error:
         raise HTTPException(
@@ -270,28 +336,30 @@ async def voice(
         safe_unlink(input_audio_path)
 
     response_audio = result.get("response_audio")
-    if not response_audio:
+    expected_audio = VOICE_DIR / "ai_response.mp3"
+    if not response_audio or Path(response_audio).resolve() != expected_audio.resolve():
         raise HTTPException(
             status_code=502,
-            detail="The voice assistant could not generate an audio response."
+            detail="The voice assistant did not generate Voice/ai_response.mp3."
         )
     avatar = result.get("avatar") or {}
-
-    try:
-        rel_audio_path = Path(response_audio).resolve().relative_to(VOICE_DIR.resolve()).as_posix()
-    except Exception:
-        rel_audio_path = Path(response_audio).name
+    if avatar.get("talk_id"):
+        global latest_active_talk_id
+        with active_talk_id_lock:
+            latest_active_talk_id = avatar["talk_id"]
 
     return {
         "mode": result.get("mode", mode),
         "language": result.get("language", "English"),
         "user_text": result.get("user_query", ""),
         "response": result.get("response", ""),
-        "audio_url": f"/voice-files/{rel_audio_path}",
+        "audio_url": f"/voice-files/ai_response.mp3?v={uuid4().hex}",
         "avatar": avatar,
         "avatar_status": avatar.get("status", "idle"),
         "avatar_talk_id": avatar.get("talk_id"),
         "avatar_video_url": avatar.get("video_url"),
+        "avatar_error": avatar.get("error"),
+        "stream_talk": bool(avatar.get("is_stream")),
     }
 
 
@@ -301,20 +369,10 @@ def avatar_root():
     return get_avatar_info()
 
 
-@app.get("/avatar/status")
-@app.get("/avatar/status/")
 @app.get("/avatar/status/{talk_id}")
-def get_avatar_status(talk_id: str = "latest"):
-    if not talk_id or talk_id.strip() in ("", "None", "null"):
-        talk_id = "latest"
-
-    if talk_id == "latest":
-        latest = getattr(get_assistant(), "_latest_avatar_status", None)
-        if not latest:
-            return {"status": "idle", "talk_id": None, "video_url": None}
-        if not latest.get("talk_id"):
-            return latest
-        talk_id = latest["talk_id"]
+def get_avatar_status(talk_id: str):
+    if not talk_id.startswith("tlk_") or not re.fullmatch(r"[A-Za-z0-9_-]+", talk_id):
+        raise HTTPException(status_code=400, detail="A real D-ID talk ID is required.")
 
     try:
         from Avtar.DID_Servicee import DIDService
@@ -325,34 +383,31 @@ def get_avatar_status(talk_id: str = "latest"):
         result_url = status_data.get("result_url")
 
         if d_status == "done":
-            video_url = result_url
-            if result_url:
-                try:
-                    local_filename = f"talk_{talk_id}.mp4"
-                    local_path = AVATAR_DIR / local_filename
-                    if not local_path.exists():
-                        import requests
-                        temp_path = AVATAR_DIR / f"temp_{talk_id}.mp4"
-                        r = requests.get(result_url, timeout=30)
-                        if r.status_code == 200:
-                            temp_path.write_bytes(r.content)
-                            did_service.composite_full_avatar(
-                                str(temp_path),
-                                str(local_path),
-                            )
-                            temp_path.unlink(missing_ok=True)
-                    if local_path.exists() and local_path.stat().st_size > 10000:
-                        video_url = f"/avatar-files/{local_filename}"
-                except Exception as comp_err:
-                    print(f"[AVATAR WARNING] Full-frame composite skipped: {comp_err}")
+            if not result_url:
+                raise RuntimeError(f"D-ID completed talk {talk_id} without result_url.")
+            local_filename = "response_avatar.mp4"
+            local_path = AVATAR_DIR / local_filename
+
+            # Re-use single output response_avatar.mp4
+            # Concurrency protection: Only write if this is still the active or latest talk
+            with active_talk_id_lock:
+                should_save = (latest_active_talk_id is None or latest_active_talk_id == talk_id)
+
+            if should_save:
+                did_service.download_video(result_url, local_path)
 
             return {
                 "status": "done",
                 "talk_id": talk_id,
-                "video_url": video_url,
+                "video_url": f"/avatar-files/{local_filename}?v={talk_id}",
             }
-        elif d_status in ("error", "failed"):
-            raw_err = status_data.get("data", {}).get("error") or "Avatar generation failed."
+        elif d_status in ("error", "failed", "rejected"):
+            raw_data = status_data.get("data") or {}
+            raw_err = (
+                raw_data.get("error")
+                if isinstance(raw_data, dict)
+                else raw_data
+            ) or "Avatar generation failed."
             is_credit = "credit" in str(raw_err).lower()
             return {
                 "status": "error",
@@ -369,99 +424,191 @@ def get_avatar_status(talk_id: str = "latest"):
             }
     except Exception as error:
         print(f"[AVATAR ERROR] Error checking talk status for {talk_id}: {error}")
-        return {
-            "status": "error",
-            "talk_id": talk_id,
-            "video_url": None,
-            "error": str(error),
-        }
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not retrieve or validate D-ID talk {talk_id}: {error}",
+        ) from error
 
 
 @app.get("/avatar/info")
 def get_avatar_info():
-    try:
-        from Avtar.avtar_config import get_avatar
+    from Avtar.avtar_config import get_avatar
 
-        cfg = get_avatar()
-        return {
-            "image_url": cfg.get("browser_url", "/avatar-files/avtar_img.jpg"),
-            "source_url": cfg.get("image_url"),
-            "image_id": cfg.get("image_id"),
-            "name": "Avtar",
-        }
-    except Exception:
-        return {
-            "image_url": "/avatar-files/avtar_img.jpg",
-            "name": "Avtar",
-        }
+    cfg = get_avatar()
+    return {
+        "image_url": cfg.get("browser_url", "/avatar-files/avtar_img.jpg"),
+        "source_url": cfg.get("image_url"),
+        "image_id": cfg.get("image_id"),
+        "name": "Avtar",
+    }
 
 
 @app.get("/avatar/greeting")
 def get_avatar_greeting():
-    greeting_text = "Hi, I'm your AI employee assistant. How can I help you today?"
-    greeting_video_path = AVATAR_DIR / "greeting_avatar.mp4"
-    custom_video_path = AVATAR_DIR / "greeting_custom_avatar.mp4"
-    greeting_audio_path = VOICE_DIR / "greeting.mp3"
-
-    if not greeting_audio_path.exists():
-        try:
-            get_assistant().tts_service.generate_speech(
-                text=greeting_text,
-                output_file=str(greeting_audio_path),
-            )
-        except Exception as error:
-            print(f"[GREETING ERROR] TTS audio generation failed: {error}")
-
+    import time
     from Avtar.avtar_config import get_avatar
     cfg = get_avatar()
-    browser_url = cfg.get("browser_url", "/avatar-files/avtar_img.jpg")
-    is_custom = "custom_avatar" in browser_url
+    is_custom = "custom_avatar" in cfg.get("browser_url", "")
+    greeting_text = "Hi, I am your AI employee assistant. How can I help you today?"
+    greeting_video_path = AVATAR_DIR / "greeting_avatar.mp4"
+    ts = int(time.time() * 1000)
 
-    video_url = None
-    talk_id = None
+    # For instant start, return pre-rendered greeting_avatar.mp4 with fresh timestamp
+    if greeting_video_path.is_file() and greeting_video_path.stat().st_size > 10000:
+        return {
+            "text": greeting_text,
+            "video_url": f"/avatar-files/{greeting_video_path.name}?t={ts}",
+            "audio_url": f"/avatar-files/{greeting_video_path.name}?t={ts}",
+            "status": "ready",
+            "talk_id": None,
+            "quick_options": [
+                {"label": "📅 My attendance", "query": "Show my attendance"},
+                {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
+                {"label": "👤 My profile", "query": "Show my complete employee profile details"},
+            ],
+        }
 
-    if is_custom:
-        if custom_video_path.exists() and custom_video_path.stat().st_size > 10000:
-            video_url = f"/avatar-files/{custom_video_path.name}"
-        else:
-            # Initiate D-ID talk for custom avatar greeting using ElevenLabs audio
-            image_url = cfg.get("image_url")
-            if image_url and greeting_audio_path.exists():
+    assistant_service = get_assistant()
+    response_audio_path = VOICE_DIR / "ai_response.mp3"
+    try:
+        with assistant_service._audio_pipeline_lock, lock_response_audio(
+            response_audio_path
+        ):
+            audio_path = assistant_service.tts_service.generate_speech(
+                text=greeting_text,
+                output_file=str(response_audio_path),
+            )
+            avatar_res = {}
+            if hasattr(assistant_service, "start_avatar"):
                 try:
-                    from Avtar.DID_Servicee import DIDService
-                    did = DIDService()
-                    talk_res = did.start_talking_avatar_from_audio(
-                        image_url=image_url,
-                        audio_path=str(greeting_audio_path),
-                        expression="happy",
+                    avatar_res = assistant_service.start_avatar(
+                        audio_path, greeting_text
                     )
-                    talk_id = talk_res.get("talk_id")
-                    if talk_id:
-                        get_assistant()._latest_avatar_status = {
-                            "talk_id": talk_id,
-                            "status": "processing",
-                            "video_url": None,
-                            "is_greeting": True,
-                        }
-                except Exception as did_err:
-                    print(f"[GREETING D-ID INFO] Custom avatar D-ID talk initiation: {did_err}")
-    else:
-        if greeting_video_path.exists() and greeting_video_path.stat().st_size > 10000:
-            video_url = f"/avatar-files/{greeting_video_path.name}"
+                except Exception:
+                    avatar_res = {}
+            return {
+                "text": greeting_text,
+                "video_url": avatar_res.get("video_url") or f"/avatar-files/greeting_avatar.mp4?t={ts}",
+                "audio_url": f"/voice-files/{response_audio_path.name}?t={ts}",
+                "status": avatar_res.get("status") or "ready",
+                "talk_id": avatar_res.get("talk_id"),
+                "quick_options": [
+                    {"label": "📅 My attendance", "query": "Show my attendance"},
+                    {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
+                    {"label": "👤 My profile", "query": "Show my complete employee profile details"},
+                ],
+            }
+    except Exception as error:
+        return {
+            "text": greeting_text,
+            "video_url": None,
+            "audio_url": None,
+            "status": "idle",
+            "talk_id": None,
+            "error": str(error),
+            "quick_options": [
+                {"label": "📅 My attendance", "query": "Show my attendance"},
+                {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
+                {"label": "👤 My profile", "query": "Show my complete employee profile details"},
+            ],
+        }
 
     return {
         "text": greeting_text,
-        "audio_url": (
-            f"/voice-files/{greeting_audio_path.name}"
-            if greeting_audio_path.exists()
-            else None
-        ),
-        "video_url": video_url,
-        "talk_id": talk_id,
-        "browser_url": browser_url,
-        "is_custom": is_custom,
-        "status": "ready" if (video_url or greeting_audio_path.exists()) else "processing",
+        "talk_id": avatar.get("talk_id"),
+        "status": avatar.get("status", "idle"),
+        "video_url": avatar.get("video_url"),
+        "error": avatar.get("error"),
+        "quick_options": [
+            {"label": "📅 My attendance", "query": "Show my attendance"},
+            {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
+            {"label": "👤 My profile", "query": "Show my complete employee profile details"},
+        ],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-time WebRTC Streaming Avatar Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/avatar/stream/new")
+def create_avatar_stream():
+    from Avtar.DID_Servicee import DIDService
+    from Avtar.avtar_config import get_avatar
+
+    cfg = get_avatar()
+    source_url = cfg.get("image_url") or "https://d-id-public-bucket.s3.amazonaws.com/alice.jpg"
+    try:
+        did = DIDService()
+        data = did.create_stream(source_url)
+        return {
+            "stream_id": data.get("id"),
+            "session_id": data.get("session_id"),
+            "offer": data.get("offer"),
+            "ice_servers": data.get("ice_servers", []),
+        }
+    except Exception as err:
+        return {"error": str(err), "stream_id": None}
+
+
+@app.post("/avatar/stream/sdp")
+def submit_avatar_stream_sdp(req: StreamSdpRequest):
+    from Avtar.DID_Servicee import DIDService
+
+    try:
+        did = DIDService()
+        res = did.send_stream_sdp(req.stream_id, req.answer, req.session_id)
+        return {"success": True, "data": res}
+    except Exception as err:
+        return {"success": False, "error": str(err)}
+
+
+@app.post("/avatar/stream/ice")
+def submit_avatar_stream_ice(req: StreamIceRequest):
+    from Avtar.DID_Servicee import DIDService
+
+    try:
+        did = DIDService()
+        ok = did.send_stream_ice(
+            req.stream_id,
+            req.candidate,
+            req.sdp_mid,
+            req.sdp_mline_index,
+            req.session_id,
+        )
+        return {"success": ok}
+    except Exception as err:
+        return {"success": False, "error": str(err)}
+
+
+@app.post("/avatar/stream/talk")
+def submit_avatar_stream_talk(req: StreamTalkRequest):
+    from Avtar.DID_Servicee import DIDService
+
+    try:
+        did = DIDService()
+        script = {}
+        if req.audio_url:
+            script = {"type": "audio", "audio_url": req.audio_url}
+        elif req.text:
+            script = {"type": "text", "input": req.text}
+        res = did.talk_stream(req.stream_id, req.session_id, script)
+        return {"success": True, "data": res}
+    except Exception as err:
+        return {"success": False, "error": str(err)}
+
+
+@app.delete("/avatar/stream/{stream_id}")
+def delete_avatar_stream(stream_id: str, session_id: str = ""):
+    from Avtar.DID_Servicee import DIDService
+
+    try:
+        did = DIDService()
+        did.close_stream(stream_id, session_id)
+    except Exception:
+        pass
+    return {"success": True}
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -498,37 +645,24 @@ async def upload_custom_avatar(image: UploadFile = File(...)):
             detail="Uploaded file appears to be empty or too small.",
         )
 
-    # Persist locally so it is served via /avatar-files/
     local_filename = f"custom_avatar{suffix}"
     local_path = AVATAR_DIR / local_filename
-    try:
-        local_path.write_bytes(raw)
-    except Exception as save_err:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to save image: {save_err}",
-        ) from save_err
-
-    # Clean up old custom greeting video if present
-    custom_greeting = AVATAR_DIR / "greeting_custom_avatar.mp4"
-    if custom_greeting.exists():
-        try:
-            custom_greeting.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     browser_url = f"/avatar-files/{local_filename}"
+    staged_path = AVATAR_DIR / f".avatar-upload-{uuid4().hex}{suffix}"
+    staged_path.write_bytes(raw)
 
-    # Upload to D-ID and update config
     try:
         from Avtar.DID_Servicee import DIDService
         from Avtar.avtar_config import save_avatar
 
         did = DIDService()
-        did_result = did.upload_image(str(local_path))
+        did_result = did.upload_image(str(staged_path))
         image_id = did_result.get("image_id") or ""
         image_url = did_result.get("image_url") or ""
+        if not image_id or not image_url:
+            raise RuntimeError("D-ID image upload returned no image ID or URL.")
 
+        os.replace(staged_path, local_path)
         save_avatar(
             image_id=image_id,
             image_url=image_url,
@@ -542,46 +676,27 @@ async def upload_custom_avatar(image: UploadFile = File(...)):
             "message": "Custom avatar uploaded and activated successfully.",
         }
     except Exception as did_err:
-        # D-ID upload failed — still serve the locally saved image for the UI,
-        # but fall back to the existing D-ID image_url for lip-sync generation.
-        print(f"[AVATAR UPLOAD] D-ID upload failed, using local file only: {did_err}")
-        try:
-            from Avtar.avtar_config import get_avatar, save_avatar
-            existing = get_avatar()
-            save_avatar(
-                image_id=existing.get("image_id", ""),
-                image_url=existing.get("image_url", ""),
-                browser_url=browser_url,
-            )
-        except Exception:
-            pass
-        return {
-            "success": True,
-            "browser_url": browser_url,
-            "image_id": None,
-            "image_url": None,
-            "warning": f"Image saved locally but D-ID upload failed: {did_err}. Lip-sync will use the previous D-ID image.",
-        }
+        raise HTTPException(
+            status_code=502,
+            detail=f"D-ID avatar image upload failed: {did_err}",
+        ) from did_err
+    finally:
+        staged_path.unlink(missing_ok=True)
 
 
 @app.post("/avatar/reset")
 def reset_avatar():
-    """Reset the avatar back to the built-in default."""
+    """Upload the built-in avatar image and activate its D-ID URL."""
     try:
+        from Avtar.DID_Servicee import DIDService
         from Avtar.avtar_config import save_avatar
 
-        custom_greeting = AVATAR_DIR / "greeting_custom_avatar.mp4"
-        if custom_greeting.exists():
-            try:
-                custom_greeting.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        default_image_id = os.getenv("DEFAULT_AVATAR_IMAGE_ID", "")
-        default_image_url = os.getenv("DEFAULT_AVATAR_IMAGE_URL", "")
+        image = DIDService().upload_image(str(AVATAR_DIR / "avtar_img.jpg"))
+        if not image.get("image_id") or not image.get("image_url"):
+            raise RuntimeError("D-ID image upload returned no image ID or URL.")
         save_avatar(
-            image_id=default_image_id,
-            image_url=default_image_url,
+            image_id=image["image_id"],
+            image_url=image["image_url"],
             browser_url="/avatar-files/avtar_img.jpg",
         )
         return {
@@ -590,29 +705,19 @@ def reset_avatar():
             "message": "Avatar reset to default.",
         }
     except Exception as err:
-        raise HTTPException(status_code=500, detail=str(err)) from err
+        raise HTTPException(status_code=502, detail=f"Could not activate the default D-ID avatar: {err}") from err
 
 
 @app.get("/avatar/custom-info")
 def get_custom_avatar_info():
     """Return current avatar config including whether a custom avatar is active."""
-    try:
-        from Avtar.avtar_config import get_avatar
+    from Avtar.avtar_config import get_avatar
 
-        cfg = get_avatar()
-        browser_url = cfg.get("browser_url", "/avatar-files/avtar_img.jpg")
-        is_custom = "custom_avatar" in browser_url
-        return {
-            "browser_url": browser_url,
-            "image_id": cfg.get("image_id"),
-            "image_url": cfg.get("image_url"),
-            "is_custom": is_custom,
-        }
-    except Exception as err:
-        return {
-            "browser_url": "/avatar-files/avtar_img.jpg",
-            "image_id": None,
-            "image_url": None,
-            "is_custom": False,
-            "error": str(err),
-        }
+    cfg = get_avatar()
+    browser_url = cfg["browser_url"]
+    return {
+        "browser_url": browser_url,
+        "image_id": cfg["image_id"],
+        "image_url": cfg["image_url"],
+        "is_custom": "custom_avatar" in browser_url,
+    }

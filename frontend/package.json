@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@d-id/client-sdk": "^2.0.10",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

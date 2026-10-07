@@ -1101,16 +1101,6 @@ textarea:focus-visible {
   background: #060910;
 }
 
-/* When avatarVideoUrl is null the <video> stays mounted (so videoRef.current
-   is always valid for imperative src switching) but is invisible. */
-.avatar-image--hidden {
-  display: none !important;
-}
-
-.avatar-video--hidden {
-  display: none !important;
-}
-
 /* State Overlays on Avatar */
 .avatar-live-indicator {
   position: absolute;
@@ -3859,46 +3849,45 @@ textarea:focus-visible {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
-   FLOATING AVATAR SHORTCUT BUTTON
-   Fixed bottom-right; always above page content; hidden on Avtar page.
+   FLOATING AVATAR LAUNCHER BUTTON (Fiverr / Support-Widget Style)
+   Fixed bottom-right; toggles compact avatar support widget.
 ═══════════════════════════════════════════════════════════════════════ */
 
 .floating-avatar-btn {
   position: fixed;
-  bottom: 28px;
-  right: 28px;
-  z-index: 1100;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1201;
 
-  /* Perfect circle */
-  width: 64px;
-  height: 64px;
+  width: 58px;
+  height: 58px;
   border-radius: 50%;
-  border: none;
+  border: 2px solid rgba(124, 108, 255, 0.45);
   padding: 0;
   overflow: visible;
   cursor: pointer;
 
-  /* Glassy layered background behind the image */
-  background: linear-gradient(145deg, rgba(124, 108, 255, 0.22), rgba(56, 189, 248, 0.14));
+  background: #0b0f19;
   box-shadow:
-    0 0 0 2.5px rgba(124, 108, 255, 0.55),
-    0 8px 28px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.35);
+    0 10px 25px -4px rgba(0, 0, 0, 0.55),
+    0 4px 10px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
 
-  /* Smooth all interactions */
   transition:
-    transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
-    box-shadow 0.22s ease,
-    opacity 0.18s ease;
+    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
 
-  /* Entrance animation */
-  animation: floatBtnAppear 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: floatBtnAppear 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 @keyframes floatBtnAppear {
   from {
     opacity: 0;
-    transform: scale(0.55) translateY(16px);
+    transform: scale(0.7) translateY(12px);
   }
   to {
     opacity: 1;
@@ -3907,20 +3896,18 @@ textarea:focus-visible {
 }
 
 .floating-avatar-btn:hover {
-  transform: scale(1.1) translateY(-3px);
+  transform: translateY(-2px) scale(1.04);
+  border-color: rgba(124, 108, 255, 0.85);
   box-shadow:
-    0 0 0 3px rgba(124, 108, 255, 0.75),
-    0 0 28px rgba(124, 108, 255, 0.45),
-    0 14px 40px rgba(0, 0, 0, 0.65),
-    0 3px 10px rgba(0, 0, 0, 0.4);
+    0 14px 32px -4px rgba(124, 108, 255, 0.35),
+    0 6px 14px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(124, 108, 255, 0.5);
 }
 
 .floating-avatar-btn:active {
-  transform: scale(0.96) translateY(0);
-  transition-duration: 0.1s;
+  transform: translateY(0) scale(0.97);
 }
 
-/* Avatar image — fills the circle perfectly */
 .floating-avatar-img {
   display: block;
   width: 100%;
@@ -3932,38 +3919,24 @@ textarea:focus-visible {
   user-select: none;
 }
 
-/* Pulsing outer ring — indicates "AI is available" */
-.floating-avatar-ripple {
+.floating-avatar-status-dot {
   position: absolute;
-  inset: -5px;
+  bottom: 2px;
+  right: 2px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
-  border: 2px solid rgba(124, 108, 255, 0.5);
+  background: #10b981;
+  border: 2.5px solid #0b0f19;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
   pointer-events: none;
-  animation: avatarRipple 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-@keyframes avatarRipple {
-  0% {
-    transform: scale(1);
-    opacity: 0.7;
-  }
-  70% {
-    transform: scale(1.28);
-    opacity: 0;
-  }
-  100% {
-    transform: scale(1.28);
-    opacity: 0;
-  }
-}
-
-/* Tooltip — appears above the button on hover */
 .floating-avatar-tooltip {
   position: absolute;
   bottom: calc(100% + 10px);
   right: 0;
   white-space: nowrap;
-
   background: rgba(13, 17, 26, 0.95);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(124, 108, 255, 0.35);
@@ -3975,16 +3948,11 @@ textarea:focus-visible {
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   pointer-events: none;
-
-  /* Hidden by default; visible on parent hover */
   opacity: 0;
   transform: translateY(6px) scale(0.95);
-  transition:
-    opacity 0.18s ease,
-    transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* Small arrow pointing down */
 .floating-avatar-tooltip::after {
   content: "";
   position: absolute;
@@ -3999,37 +3967,544 @@ textarea:focus-visible {
   transform: translateY(0) scale(1);
 }
 
-/* Mobile: slightly smaller and tuck in from the edge */
-@media (max-width: 640px) {
-  .floating-avatar-btn {
-    width: 54px;
-    height: 54px;
-    bottom: 20px;
-    right: 16px;
+/* ═══════════════════════════════════════════════════════════════════════
+   COMPACT FLOATING AVATAR PANEL
+   Fiverr-style support widget anchored directly above launcher button.
+═══════════════════════════════════════════════════════════════════════ */
+
+.floating-avatar-panel {
+  position: fixed;
+  bottom: 94px;
+  right: 24px;
+  z-index: 1200;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  height: 580px;
+  max-height: calc(100vh - 110px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(11, 15, 24, 0.96);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(124, 108, 255, 0.35);
+  border-radius: 20px;
+  box-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 0 35px rgba(124, 108, 255, 0.18);
+  overflow: hidden;
+  animation: panelPopIn 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: width 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+              height 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+              max-height 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+              border-radius 0.22s ease,
+              box-shadow 0.22s ease;
+}
+
+/* Minimized Docked Mini-Bar */
+.floating-avatar-panel.is-minimized {
+  height: 52px !important;
+  min-height: 52px !important;
+  width: 340px !important;
+  border-radius: 26px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7), 0 0 20px rgba(124, 108, 255, 0.3);
+}
+
+.floating-avatar-panel.is-minimized .floating-panel-header {
+  border-bottom: none;
+  padding: 8px 14px;
+  height: 100%;
+  border-radius: 26px;
+  background: rgba(18, 24, 38, 0.98);
+}
+
+/* Maximized Viewport View: Expands chat view area while keeping avatar at crisp, proper size */
+.floating-avatar-panel.is-maximized {
+  width: 520px !important;
+  max-width: calc(100vw - 32px);
+  height: 740px !important;
+  max-height: calc(100vh - 100px);
+}
+
+@keyframes panelPopIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   AUDIO-DRIVEN SPEAKING STATE
-   Avatar's original face and mouth remain 100% intact with zero artificial
-   overlays. Natural ambient aura reacts to voice speech dynamics.
-═══════════════════════════════════════════════════════════════════════ */
-
-.avatar-stage.audio-lipsync .avatar-image {
-  /* Living subtle presence while speaking */
-  filter: brightness(1.02);
-  transition: filter 0.2s ease;
+/* Header */
+.floating-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(18, 24, 38, 0.92);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
 }
 
-/* Natural speaking glow that pulses subtly with audio signal */
-.avatar-stage.audio-lipsync {
-  --glow-intensity: calc(var(--lip-open, 0) * 25px);
+.floating-panel-header:active {
+  cursor: grabbing;
+}
+
+.floating-panel-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.floating-panel-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.floating-panel-icon {
+  color: #7c6cff;
+  font-size: 15px;
+}
+
+.floating-panel-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #f1f3f9;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.floating-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.floating-panel-action-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  font-size: 12px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  flex-shrink: 0;
+}
+
+.floating-panel-action-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #f1f5f9;
+}
+
+.floating-panel-action-btn.refresh-btn:hover {
+  background: rgba(99, 102, 241, 0.25);
+  color: #818cf8;
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.floating-panel-action-btn.minimize-btn:hover {
+  background: rgba(148, 163, 184, 0.2);
+  color: #f1f5f9;
+}
+
+.floating-panel-action-btn.maximize-btn:hover {
+  background: rgba(148, 163, 184, 0.2);
+  color: #f1f5f9;
+}
+
+.floating-panel-action-btn.close-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+/* Adapt .avatar-stage for compact floating presentation while preserving exact 1:1 ratio, sharpness & lighting */
+.floating-avatar-stage-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px 8px 14px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.45) 0%, rgba(8, 11, 20, 0.65) 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.floating-avatar-panel .avatar-stage {
+  width: 175px;
+  height: 175px;
+  min-height: 175px;
+  max-height: 175px;
+  aspect-ratio: 1 / 1;
+  border-radius: 18px;
+  position: relative;
+  top: unset;
+  margin: 0 auto;
+  flex-shrink: 0;
+  background: #060910;
+  border: 1.5px solid rgba(148, 163, 184, 0.18);
   box-shadow:
-    0 0 var(--glow-intensity) rgba(124, 108, 255, 0.5),
-    0 24px 60px rgba(0, 0, 0, 0.5),
-    inset 0 0 40px rgba(0, 0, 0, 0.4);
-  transition: box-shadow 0.08s linear;
+    0 16px 36px rgba(0, 0, 0, 0.55),
+    inset 0 0 30px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+.floating-avatar-panel.is-maximized .avatar-stage {
+  width: 185px;
+  height: 185px;
+  min-height: 185px;
+  max-height: 185px;
+  aspect-ratio: 1 / 1;
+}
+
+.floating-avatar-panel .avatar-video,
+.floating-avatar-panel .avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: 18px;
+  display: block;
+}
+
+.floating-avatar-panel .avatar-live-visualizer.compact-visualizer {
+  margin: 6px 12px 2px 12px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  max-width: calc(100% - 24px);
+}
+
+/* Chat Messages Transcript Area */
+.floating-avatar-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  background: rgba(11, 15, 25, 0.6);
+  overflow: hidden;
+}
+
+.floating-chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.floating-chat-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.floating-chat-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+.floating-chat-bubble {
+  padding: 8px 11px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+  animation: bubbleFade 0.2s ease-out;
+}
+
+.floating-chat-bubble .bubble-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.floating-chat-bubble .bubble-time {
+  font-size: 9.5px;
+  opacity: 0.6;
+}
+
+.floating-chat-bubble.user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, rgba(124, 108, 255, 0.25), rgba(99, 102, 241, 0.3));
+  border: 1px solid rgba(124, 108, 255, 0.35);
+  color: #e0e7ff;
+  max-width: 88%;
+}
+
+.floating-chat-bubble.assistant {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: #f1f5f9;
+  max-width: 94%;
+}
+
+.floating-chat-bubble.assistant.error {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fecaca;
+}
+
+.floating-chat-bubble.user .bubble-label {
+  color: #a5b4fc;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.floating-chat-bubble.assistant .bubble-label {
+  color: #38bdf8;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.floating-chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #64748b;
+  font-size: 12px;
+  padding: 16px;
+  gap: 6px;
+}
+
+.empty-avatar-icon {
+  font-size: 26px;
+  margin-bottom: 2px;
+}
+
+/* Quick Conversation Option Chips */
+.floating-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(14, 20, 33, 0.92);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.floating-quick-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 9px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.floating-quick-chip:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.22);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.floating-quick-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Controls: Text Input + Stop + Mic + Send */
+.floating-avatar-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: rgba(18, 24, 38, 0.95);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.floating-input-field {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  padding: 8px 11px;
+  color: #f1f5f9;
+  font-size: 12.5px;
+  outline: none;
+  transition: all 0.18s ease;
+}
+
+.floating-input-field:focus {
+  border-color: rgba(124, 108, 255, 0.6);
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 2px rgba(124, 108, 255, 0.2);
+}
+
+.floating-ctrl-btn {
+  width: 35px;
+  height: 35px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.floating-stop-btn {
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #fca5a5;
+  width: auto;
+  padding: 0 11px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  gap: 3px;
+  animation: pulseStop 1.8s infinite;
+}
+
+.floating-stop-btn:hover {
+  background: rgba(239, 68, 68, 0.4);
+  border-color: rgba(239, 68, 68, 0.85);
+  color: #ffffff;
+  transform: scale(1.04);
+}
+
+@keyframes pulseStop {
+  0%, 100% { border-color: rgba(239, 68, 68, 0.55); }
+  50% { border-color: rgba(239, 68, 68, 0.9); box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
+}
+
+.floating-mute-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #cbd5e1;
+}
+
+.floating-mute-btn.muted {
+  background: rgba(245, 158, 11, 0.25);
+  border-color: rgba(245, 158, 11, 0.6);
+  color: #fde68a;
+}
+
+.floating-mic-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #f1f5f9;
+}
+
+.floating-mic-btn:hover:not(:disabled) {
+  background: rgba(124, 108, 255, 0.25);
+  border-color: rgba(124, 108, 255, 0.5);
+  transform: scale(1.04);
+}
+
+.floating-mic-btn.active {
+  background: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #fca5a5;
+  animation: pulseListen 1.5s infinite;
+}
+
+.floating-send-btn {
+  background: linear-gradient(135deg, #7c6cff, #4f46e5);
+  color: #fff;
+  border: none;
+}
+
+.floating-send-btn:hover:not(:disabled) {
+  transform: scale(1.04);
+  box-shadow: 0 4px 12px rgba(124, 108, 255, 0.4);
+}
+
+.floating-send-btn:disabled,
+.floating-mic-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Avatar state indicator styles */
+.avatar-status-pill.muted {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fde68a;
+}
+
+.avatar-status-pill.error {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.avatar-stage.error {
+  border-color: rgba(239, 68, 68, 0.7);
+  box-shadow: 0 0 45px rgba(239, 68, 68, 0.25);
+}
+
+.avatar-live-indicator.error {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+
+.avatar-live-indicator.error .indicator-chip {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fecaca;
+}
+
+@media (max-width: 480px) {
+  .floating-avatar-btn {
+    width: 52px;
+    height: 52px;
+    bottom: 16px;
+    right: 16px;
+  }
+
+  .floating-avatar-panel {
+    bottom: 76px;
+    right: 12px;
+    width: calc(100vw - 24px);
+    height: 520px;
+    max-height: calc(100vh - 90px);
+  }
+
+  .floating-avatar-panel .avatar-stage {
+    width: 155px;
+    height: 155px;
+    min-height: 155px;
+    max-height: 155px;
+  }
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════════
    CUSTOM AVATAR UPLOAD UI (Settings page)
@@ -4370,4 +4845,31 @@ textarea:focus-visible {
   padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   margin: 0;
+}
+
+/* Sidebar navigation avatar thumbnail */
+.nav-avatar-img {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center top;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* AvtarPage quick chips and text chat controls */
+.avtar-page-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.avtar-page-text-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  width: 100%;
 }

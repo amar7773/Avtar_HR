@@ -1,10 +1,13 @@
 import os
+from pathlib import Path
 import sounddevice as sd
 import soundfile as sf
 
+DEFAULT_INPUT_WAV = str(Path(__file__).resolve().parent / "user_input.wav")
+
 
 def record_audio(
-    filename="Voice/user_input.wav",
+    filename=DEFAULT_INPUT_WAV,
     duration=5,
     sample_rate=16000
 ):

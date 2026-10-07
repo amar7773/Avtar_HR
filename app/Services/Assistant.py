@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-from uuid import uuid4
 
 # Ensure Windows terminal doesn't crash on Devanagari or Unicode prints
 if hasattr(sys.stdout, "reconfigure"):
@@ -23,6 +22,7 @@ from app.Services.structured_query import StructuredQueryRouter
 from Rag.rag_service import RAGService
 from Voice.Stt import STTService
 from Voice.Tts import TTSService
+from Voice.response_audio_lock import lock_response_audio
 from Avtar.DID_Servicee import DIDService
 from Avtar.avtar_config import get_avatar
 
@@ -31,6 +31,8 @@ class AssistantService:
 
     def __init__(self):
         self.voice_dir = Path(__file__).resolve().parents[2] / "Voice"
+        self.response_audio_path = self.voice_dir / "ai_response.mp3"
+        self._audio_pipeline_lock = threading.Lock()
 
         self.prediction_service = IntentPredictionService()
         self.llm_service = LLMServices()
@@ -40,8 +42,6 @@ class AssistantService:
         self.tts_service = TTSService()
 
         self._conversation_history = {}
-        self.avatar = get_avatar()
-        self._latest_avatar_status = {}
 
     def process(self, user_query, employee_id):
         history = self._conversation_history.get(str(employee_id), [])
@@ -142,198 +142,170 @@ class AssistantService:
         }
         return normalized in tokens
 
-    def _new_resp_file(self):
-        """Return a unique path for a new TTS response audio file."""
-        return self.voice_dir / f"resp_{uuid4().hex[:8]}.mp3"
-
-    def _stt_error_response(self, stt_lang, mode):
-        """Build the audio fallback response when STT fails or returns empty text."""
-        if stt_lang in ("hin", "hi"):
-            response_text = "आपकी आवाज़ ठीक से सुनाई नहीं दी, कृपया दोबारा बोलें।"
-            detected_lang = "Hindi"
-        elif stt_lang in ("eng", "en"):
-            response_text = "I could not hear your voice clearly, please speak again."
-            detected_lang = "English"
-        else:
-            response_text = "Aapki aawaz theek se sunayi nahi di, kripya dobara bolein."
-            detected_lang = "Hinglish"
-
-        response_audio = self.tts_service.generate_speech(
-            text=response_text,
-            output_file=str(self._new_resp_file()),
-        )
-
-        avatar_info = {"talk_id": None, "status": "idle", "video_url": None}
-        if mode == "avatar_mode":
-            threading.Thread(
-                target=lambda: self._try_start_avatar(response_audio),
-                daemon=True,
-            ).start()
-            avatar_info = {
-                "talk_id": "latest",
-                "status": "instant",
-                "video_url": "/avatar-files/response_avatar.mp4",
-            }
-
-        return {
-            "mode": mode,
-            "language": detected_lang,
-            "user_query": "",
-            "response": response_text,
-            "response_audio": response_audio,
-            "avatar": avatar_info,
-        }
-
-    def _try_start_avatar(self, response_audio, expression="neutral"):
-        """Start avatar talk in background, silently ignoring errors."""
-        try:
-            self.start_avatar(response_audio, expression=expression)
-        except Exception:
-            pass
-
-    def process_speech_to_speech(self, audio_file, employee_id, mode="avatar_mode"):
-        stt_lang = getattr(self.stt_service, "last_detected_language", None)
-
+    def process_speech_to_speech(
+        self, audio_file, employee_id, mode="avatar_mode", stream_id=None, session_id=None
+    ):
         try:
             user_text = self.stt_service.transcribe(audio_file)
-        except Exception:
-            stt_lang = getattr(self.stt_service, "last_detected_language", None)
-            return self._stt_error_response(stt_lang, mode)
+        except Exception as error:
+            raise RuntimeError(f"Speech transcription failed: {error}") from error
 
         if not user_text or not user_text.strip():
-            return self._stt_error_response(stt_lang, mode)
+            raise ValueError("Speech transcription returned no text; no avatar talk was created.")
 
-        try:
-            result = self.process(user_query=user_text.strip(), employee_id=employee_id)
-        except Exception as proc_err:
-            print(f"[ASSISTANT ERROR] Error processing query: {proc_err}")
-            result = {
-                "user_query": user_text.strip(),
-                "response": "I apologize, but I am having trouble processing your request right now. Please try again in a moment.",
-                "language": detect_language_mode(user_text.strip(), hint=stt_lang),
-            }
+        stt_lang = getattr(self.stt_service, "last_detected_language", None)
+        result = self.process(user_query=user_text.strip(), employee_id=employee_id)
 
         detected_lang = result.get("language") or detect_language_mode(user_text.strip(), hint=stt_lang)
         result["language"] = detected_lang
 
         response_text = (result.get("response") or "").strip()
         if not response_text:
-            if detected_lang == "Hindi":
-                response_text = "मैं आपका अनुरोध समझ नहीं पाया, कृपया दोबारा पूछें।"
-            elif detected_lang == "Hinglish":
-                response_text = "Main aapka request samajh nahi paya, kripya dobara poochein."
-            else:
-                response_text = "I couldn't process your request, please ask again."
+            raise ValueError("The AI assistant returned an empty response; no avatar talk was created.")
         result["response"] = response_text
 
-        try:
+        with self._audio_pipeline_lock, lock_response_audio(self.response_audio_path):
             response_audio = self.tts_service.generate_speech(
                 text=response_text,
-                output_file=str(self._new_resp_file()),
+                output_file=str(self.response_audio_path),
             )
-            self._cleanup_old_voice_files()
-        except Exception as tts_err:
-            print(f"[ASSISTANT ERROR] TTS generation error: {tts_err}")
-            fallback_greeting = self.voice_dir / "greeting.mp3"
-            response_audio = str(fallback_greeting if fallback_greeting.exists() else audio_file)
+            avatar_info = {"talk_id": None, "status": "idle", "video_url": None}
+            if mode == "avatar_mode":
+                if stream_id and session_id:
+                    try:
+                        avatar_info = self.talk_stream_avatar(
+                            stream_id=stream_id,
+                            session_id=session_id,
+                            audio_file=response_audio,
+                            response_text=response_text,
+                        )
+                    except Exception as err:
+                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using fast synchronized audio fallback.")
+                        avatar_info = {
+                            "status": "fallback",
+                            "is_stream": False,
+                            "audio_file": str(response_audio),
+                            "error": str(err),
+                        }
+                else:
+                    avatar_info = {
+                        "status": "fallback",
+                        "is_stream": False,
+                        "audio_file": str(response_audio),
+                    }
 
         result["mode"] = mode
         result["input_audio"] = audio_file
         result["response_audio"] = response_audio
+        result["avatar"] = avatar_info
+        return result
+
+    def process_text(
+        self, user_query, employee_id, mode="text_mode", stream_id=None, session_id=None
+    ):
+        result = self.process(user_query=user_query, employee_id=employee_id)
+        response_text = (result.get("response") or "").strip()
+        result["response"] = response_text
+        result["mode"] = mode
 
         if mode == "avatar_mode":
-            # Determine facial expression based on response content
-            expression = "neutral"
-            lower_resp = response_text.lower()
-            pos_words = [
-                "welcome", "happy", "badhai", "congratulat", "sure", "definitely",
-                "approved", "success", "glad", "hello", "hi", "namaste", "dhanyawad", "thank",
-            ]
-            ser_words = [
-                "sorry", "maaf", "rejected", "error", "warning", "absent", "penalty", "dispute", "strict",
-            ]
-            if any(w in lower_resp for w in pos_words):
-                expression = "happy"
-            elif any(w in lower_resp for w in ser_words):
-                expression = "serious"
-
-            # Reset latest avatar status so stale video from previous questions is NEVER returned
-            self._latest_avatar_status = {
-                "talk_id": None,
-                "status": "processing",
-                "video_url": None,
-            }
-
-            def _bg_talk():
-                try:
-                    res = self.start_avatar(response_audio, expression=expression)
-                    self._latest_avatar_status = {
-                        "talk_id": res.get("talk_id"),
-                        "status": "processing",
-                        "video_url": None,
+            with self._audio_pipeline_lock, lock_response_audio(self.response_audio_path):
+                response_audio = self.tts_service.generate_speech(
+                    text=response_text,
+                    output_file=str(self.response_audio_path),
+                )
+                if stream_id and session_id:
+                    try:
+                        avatar_info = self.talk_stream_avatar(
+                            stream_id=stream_id,
+                            session_id=session_id,
+                            audio_file=response_audio,
+                            response_text=response_text,
+                        )
+                    except Exception as err:
+                        print(f"[STREAM TALK INFO] WebRTC stream talk failed: {err}; using fast synchronized audio fallback.")
+                        avatar_info = {
+                            "status": "fallback",
+                            "is_stream": False,
+                            "audio_file": str(response_audio),
+                            "error": str(err),
+                        }
+                else:
+                    avatar_info = {
+                        "status": "fallback",
+                        "is_stream": False,
+                        "audio_file": str(response_audio),
                     }
-                except Exception as error:
-                    self._latest_avatar_status = {
-                        "talk_id": None,
-                        "status": "error",
-                        "video_url": None,
-                        "error": str(error),
-                    }
-
-            threading.Thread(target=_bg_talk, daemon=True).start()
-
-            result["avatar"] = {
-                "talk_id": "latest",
-                "status": "processing",
-                "video_url": None,
-            }
+            result["response_audio"] = response_audio
+            result["avatar"] = avatar_info
         else:
-            result["avatar"] = {
-                "talk_id": None,
-                "status": "idle",
-                "video_url": None,
-            }
+            result["avatar"] = {"talk_id": None, "status": "idle", "video_url": None}
 
         return result
 
-    def _cleanup_old_voice_files(self, keep: int = 15):
-        """Keep the latest response audio files to prevent unlimited disk growth."""
-        try:
-            files = sorted(
-                self.voice_dir.glob("resp_*.mp3"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            for f in files[keep:]:
-                try:
-                    f.unlink(missing_ok=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    def talk_stream_avatar(self, stream_id, session_id, audio_file, response_text):
+        audio_path = Path(audio_file).resolve()
+        if audio_path != self.response_audio_path.resolve():
+            raise ValueError("Avatar streaming must use Voice/ai_response.mp3.")
+        self.tts_service.validate_generated_speech(response_text, audio_path)
+        did_service = DIDService()
+        expression = did_service.expression_for_response(response_text)
+        res = did_service.talk_stream_from_audio(
+            stream_id=stream_id,
+            session_id=session_id,
+            audio_path=str(audio_path),
+            expression=expression,
+        )
+        return {
+            "stream_id": stream_id,
+            "session_id": session_id,
+            "status": "speaking",
+            "is_stream": True,
+            "expression": expression,
+            "data": res,
+        }
 
-    def get_current_avatar(self):
-        try:
-            return get_avatar()
-        except Exception:
-            return self.avatar
-
-    def start_avatar(self, audio_file, expression="neutral"):
-        current_avatar = self.get_current_avatar()
+    def start_avatar(self, audio_file, response_text):
+        audio_path = Path(audio_file).resolve()
+        if audio_path != self.response_audio_path.resolve():
+            raise ValueError("Avatar generation must use Voice/ai_response.mp3.")
+        audio_hash = self.tts_service.validate_generated_speech(
+            response_text,
+            audio_path,
+        )
+        current_avatar = get_avatar()
         image_url = current_avatar.get("image_url")
         if not image_url:
             raise ValueError("No avatar image_url configured for D-ID.")
 
-        did_service = DIDService()
-        talk_info = did_service.start_talking_avatar_from_audio(
-            image_url=image_url,
-            audio_path=audio_file,
-            expression=expression,
-        )
-        return {
-            "audio_file": audio_file,
-            "talk_id": talk_info["talk_id"],
-            "audio_url": talk_info["audio_url"],
-            "status": "processing",
-            "video_url": None,
-        }
+        try:
+            did_service = DIDService()
+            talk_info = did_service.start_talking_avatar_from_audio(
+                image_url=image_url,
+                audio_path=str(self.response_audio_path),
+                expression=did_service.expression_for_response(response_text),
+            )
+            if talk_info.get("audio_sha256") != audio_hash:
+                raise RuntimeError("D-ID uploaded audio differs from the current response MP3.")
+            return {
+                "audio_file": str(self.response_audio_path),
+                "talk_id": talk_info["talk_id"],
+                "audio_url": talk_info["audio_url"],
+                "audio_sha256": audio_hash,
+                "status": "processing",
+                "video_url": None,
+            }
+        except Exception as error:
+            error_str = str(error)
+            print(f"[AVATAR WARNING] D-ID talk creation error: {error_str}")
+            is_credit = "credit" in error_str.lower()
+            return {
+                "audio_file": str(self.response_audio_path),
+                "talk_id": None,
+                "audio_url": None,
+                "audio_sha256": audio_hash,
+                "status": "error",
+                "error": "Insufficient D-ID credits" if is_credit else error_str,
+                "credit_exhausted": is_credit,
+                "video_url": None,
+            }
