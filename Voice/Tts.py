@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,36 @@ class TTSService:
         self._generated_outputs = {}
 
     @staticmethod
+    def clean_for_speech(text: str) -> str:
+        """Strip markdown syntax, bullet markers, and code formatting for natural human-like spoken flow."""
+        if not text:
+            return ""
+        s = str(text).strip()
+        # Remove markdown links [text](url) -> text
+        s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+        # Remove bold / italics: **word** or *word* or __word__
+        s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+        s = re.sub(r"\*([^*]+)\*", r"\1", s)
+        s = re.sub(r"__([^_]+)__", r"\1", s)
+        s = re.sub(r"_([^_]+)_", r"\1", s)
+        # Remove markdown headers #, ##, etc.
+        s = re.sub(r"^#{1,6}\s*", "", s, flags=re.MULTILINE)
+        # Remove backticks / code blocks
+        s = re.sub(r"```[a-zA-Z]*\n?([\s\S]*?)```", r"\1", s)
+        s = re.sub(r"`([^`]+)`", r"\1", s)
+        # Convert bullet points (- item, * item) to clean pauses
+        s = re.sub(r"^\s*[-*•]\s+", "", s, flags=re.MULTILINE)
+        # Remove emojis that TTS might read aloud awkwardly
+        s = re.sub(r"[\U00010000-\U0010ffff]", "", s)
+        # Normalize linebreaks to natural sentence pauses
+        s = re.sub(r"\n+", ". ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        # Clean double punctuation
+        s = re.sub(r"\.+", ".", s)
+        s = re.sub(r"\s*,\s*", ", ", s)
+        return s or str(text).strip()
+
+    @staticmethod
     def validate_mp3(audio_path):
         path = Path(audio_path)
         if not path.is_file() or path.stat().st_size == 0:
@@ -40,6 +71,14 @@ class TTSService:
         audio_hash = hashlib.sha256(audio_bytes).hexdigest()
         if audio_hash in _validated_mp3_hashes:
             return audio_hash
+
+        # Fast header validation to eliminate 200-350ms ffprobe subprocess when audio is clean MP3
+        if len(audio_bytes) >= 512:
+            is_id3 = len(audio_bytes) > 10 and audio_bytes[:3] == b"ID3"
+            is_sync = len(audio_bytes) > 4 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0
+            if is_id3 or is_sync:
+                _validated_mp3_hashes.add(audio_hash)
+                return audio_hash
 
         ffprobe = shutil.which("ffprobe")
         if not ffprobe:
@@ -81,6 +120,7 @@ class TTSService:
         if not text or not str(text).strip():
             raise ValueError("Text is required for TTS.")
         text = str(text).strip()
+        spoken_text = self.clean_for_speech(text)
         output_path = (
             Path(output_file)
             if output_file
@@ -94,12 +134,25 @@ class TTSService:
             os.close(descriptor)
             temporary_path = Path(temp_name)
             try:
-                audio_stream = self.client.text_to_speech.convert(
-                    voice_id=self.voice_id.strip(),
-                    text=text,
-                    model_id=self.model_id,
-                    output_format="mp3_44100_128",
-                )
+                # Conversational voice settings for natural human-like cadence
+                convert_kwargs = {
+                    "voice_id": self.voice_id.strip(),
+                    "text": spoken_text,
+                    "model_id": self.model_id,
+                    "output_format": "mp3_44100_128",
+                }
+                try:
+                    from elevenlabs import VoiceSettings
+                    convert_kwargs["voice_settings"] = VoiceSettings(
+                        stability=0.50,
+                        similarity_boost=0.75,
+                        use_speaker_boost=True,
+                        speed=1.0,
+                    )
+                except Exception:
+                    pass
+
+                audio_stream = self.client.text_to_speech.convert(**convert_kwargs)
                 with temporary_path.open("wb") as audio_file:
                     for chunk in audio_stream:
                         if chunk:

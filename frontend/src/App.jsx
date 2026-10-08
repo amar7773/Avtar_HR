@@ -257,6 +257,109 @@ function App() {
   const [voiceCompact, setVoiceCompact] = useState(false);
   const [toast, setToast] = useState("");
 
+  const progressiveStreamRef = useRef({
+    interval: null,
+    fullText: "",
+    messageId: null,
+    onComplete: null,
+  });
+  const pendingSpeechStartCallbackRef = useRef(null);
+  const speechStartSafetyTimeoutRef = useRef(null);
+
+  const stopProgressiveStream = (commitFull = false) => {
+    if (progressiveStreamRef.current.interval) {
+      clearInterval(progressiveStreamRef.current.interval);
+      progressiveStreamRef.current.interval = null;
+    }
+    if (commitFull && progressiveStreamRef.current.fullText) {
+      const { fullText, messageId, onComplete } = progressiveStreamRef.current;
+      if (messageId) {
+        setFloatingMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
+          )
+        );
+      }
+      setLatestAiResponse(fullText);
+      if (onComplete) {
+        try {
+          onComplete();
+        } catch {}
+      }
+    }
+    progressiveStreamRef.current = {
+      interval: null,
+      fullText: "",
+      messageId: null,
+      onComplete: null,
+    };
+  };
+
+  const startProgressiveStream = ({ fullText, messageId, onComplete }) => {
+    stopProgressiveStream(false);
+    if (!fullText) return;
+
+    const words = fullText.split(/(\s+)/);
+    let currentIndex = 0;
+    let accumulatedText = "";
+
+    const totalWordCount = fullText.trim().split(/\s+/).length;
+    const estSpeechDurationSec = Math.max(2.5, Math.min(45, totalWordCount / 3.0));
+    const chunkIntervalMs = 75;
+    const totalTicks = Math.max(12, Math.round((estSpeechDurationSec * 1000) / chunkIntervalMs));
+    const tokensPerTick = Math.max(1, Math.ceil(words.length / totalTicks));
+
+    if (messageId) {
+      setFloatingMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, content: "", isThinking: false } : m
+        )
+      );
+    }
+    setLatestAiResponse("");
+
+    const interval = setInterval(() => {
+      if (currentIndex >= words.length) {
+        clearInterval(interval);
+        progressiveStreamRef.current.interval = null;
+        if (messageId) {
+          setFloatingMessages((prev) =>
+            prev.map((m) =>
+              m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
+            )
+          );
+        }
+        setLatestAiResponse(fullText);
+        if (onComplete) {
+          try {
+            onComplete();
+          } catch {}
+        }
+        return;
+      }
+
+      const nextBatch = words.slice(currentIndex, currentIndex + tokensPerTick).join("");
+      currentIndex += tokensPerTick;
+      accumulatedText += nextBatch;
+
+      if (messageId) {
+        setFloatingMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, content: accumulatedText, isThinking: false } : m
+          )
+        );
+      }
+      setLatestAiResponse(accumulatedText);
+    }, chunkIntervalMs);
+
+    progressiveStreamRef.current = {
+      interval,
+      fullText,
+      messageId,
+      onComplete,
+    };
+  };
+
   useEffect(() => {
     activePageRef.current = activePage;
   }, [activePage]);
@@ -307,9 +410,18 @@ function App() {
     const unsubEvent = avatarStreamService.on("streamEvent", (event) => {
       if (event === "started") {
         setAvatarState("speaking");
+        if (speechStartSafetyTimeoutRef.current) {
+          clearTimeout(speechStartSafetyTimeoutRef.current);
+          speechStartSafetyTimeoutRef.current = null;
+        }
+        if (pendingSpeechStartCallbackRef.current) {
+          pendingSpeechStartCallbackRef.current();
+          pendingSpeechStartCallbackRef.current = null;
+        }
       } else if (event === "done") {
         setAvatarState("idle");
         setVoiceLoading(false);
+        stopProgressiveStream(true);
       }
     });
 
@@ -668,7 +780,7 @@ function App() {
     isGreetingActiveRef.current = false;
 
     // Interrupt any playing audio, video, or speech immediately
-    if (activeAudioRef.current || ttsAudioRef.current) {
+    if (activeAudioRef.current || ttsAudioRef.current || avatarState === "speaking") {
       stopAllAudio({ resetUI: false });
     }
     if (!hasStreamVideo) {
@@ -677,6 +789,7 @@ function App() {
 
     const reqId = ++currentAudioRequestIdRef.current;
     const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const pendingAssistantId = Date.now() + 1;
 
     setLatestUserText(query);
     setLatestAiResponse("");
@@ -686,6 +799,7 @@ function App() {
     setFloatingMessages((prev) => [
       ...prev,
       { id: Date.now(), role: "user", content: query, time: now, voice: false },
+      { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: false },
     ]);
 
     try {
@@ -713,47 +827,71 @@ function App() {
       if (reqId !== currentAudioRequestIdRef.current) return;
 
       const aiResponse = data.response || "I processed your request.";
-      setLatestAiResponse(aiResponse);
 
-      setFloatingMessages((prev) => [
-        ...prev,
-        { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: false },
-      ]);
+      const triggerSpeechAndStream = () => {
+        setAvatarState("speaking");
+        startProgressiveStream({
+          fullText: aiResponse,
+          messageId: pendingAssistantId,
+        });
+      };
 
       if (data.stream_talk) {
-        setAvatarState("speaking");
-        const estSec = Math.max(3, Math.min(45, Math.ceil(aiResponse.length / 10)));
+        pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
+        const estSec = Math.max(3, Math.min(60, Math.ceil(aiResponse.length / 5)));
         if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
         speechFallbackTimeoutRef.current = setTimeout(() => {
           if (currentAudioRequestIdRef.current === reqId) {
             setAvatarState((curr) => (curr === "speaking" ? "idle" : curr));
             setVoiceLoading(false);
+            stopProgressiveStream(true);
           }
-        }, estSec * 1000 + 4000);
+        }, estSec * 1000 + 10000);
+
+        if (speechStartSafetyTimeoutRef.current) clearTimeout(speechStartSafetyTimeoutRef.current);
+        speechStartSafetyTimeoutRef.current = setTimeout(() => {
+          if (pendingSpeechStartCallbackRef.current) {
+            pendingSpeechStartCallbackRef.current();
+            pendingSpeechStartCallbackRef.current = null;
+          }
+        }, 950);
       } else {
         const talkId = data.avatar_talk_id || data?.avatar?.talk_id;
         if (talkId && typeof talkId === "string" && talkId.startsWith("tlk_")) {
           setAvatarVideoUrl(null);
           setAvatarState("preparing");
-          pollAvatarVideo(talkId, reqId);
+          pollAvatarVideo(talkId, reqId, () => {
+            triggerSpeechAndStream();
+          });
         } else if (data.audio_url) {
           const fullAudio = data.audio_url.startsWith("http") ? data.audio_url : `${API_URL}${data.audio_url}`;
           const audio = new Audio(fullAudio);
           activeAudioRef.current = audio;
-          setAvatarState("speaking");
 
           const cleanupAudio = () => {
             audio.onended = null;
             audio.onerror = null;
+            audio.onplay = null;
             if (activeAudioRef.current === audio) activeAudioRef.current = null;
+            stopProgressiveStream(true);
             setAvatarState("idle");
             setVoiceLoading(false);
+          };
+          audio.onplay = () => {
+            triggerSpeechAndStream();
           };
           audio.onended = cleanupAudio;
           audio.onerror = cleanupAudio;
           audio.play().catch(cleanupAudio);
         } else {
+          setFloatingMessages((prev) =>
+            prev.map((m) =>
+              m.id === pendingAssistantId ? { ...m, content: aiResponse, isThinking: false } : m
+            )
+          );
+          setLatestAiResponse(aiResponse);
           setAvatarState("idle");
+          setVoiceLoading(false);
         }
         if (data.avatar_error || data?.avatar?.error) {
           notify(`Avatar: ${data.avatar_error || data?.avatar?.error}`);
@@ -762,25 +900,28 @@ function App() {
     } catch (err) {
       if (reqId !== currentAudioRequestIdRef.current) return;
       console.warn("Avatar text error:", err);
-      notify(`Message failed: ${err.message}`);
-      setAvatarState("error");
-      setFloatingMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          role: "assistant",
-          error: true,
-          content: "Sorry, I couldn't process your request. Please try again.",
-          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        },
-      ]);
+      const friendlyError = "I encountered a temporary connection issue. Please try again in a moment.";
+      setAvatarState("idle");
+      setVoiceLoading(false);
+      stopProgressiveStream(false);
+      setFloatingMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingAssistantId
+            ? {
+                id: m.id,
+                role: "assistant",
+                error: true,
+                content: friendlyError,
+                isThinking: false,
+                time: now,
+              }
+            : m
+        )
+      );
+      setLatestAiResponse(friendlyError);
       setTimeout(() => {
         setAvatarState((curr) => (curr === "error" ? "idle" : curr));
       }, 4000);
-    } finally {
-      if (reqId === currentAudioRequestIdRef.current) {
-        setVoiceLoading(false);
-      }
     }
   };
 
@@ -846,6 +987,14 @@ function App() {
     currentAudioRequestIdRef.current += 1;
     shouldDiscardRecordingRef.current = true;
     isSubmittingVoiceRef.current = false;
+
+    if (speechStartSafetyTimeoutRef.current) {
+      clearTimeout(speechStartSafetyTimeoutRef.current);
+      speechStartSafetyTimeoutRef.current = null;
+    }
+    pendingSpeechStartCallbackRef.current = null;
+    stopProgressiveStream(true);
+    avatarStreamService.stopAudio();
 
     // 1. Abort any active in-flight fetch requests
     if (voiceAbortControllerRef.current) {
@@ -1050,8 +1199,8 @@ function App() {
           let firstSpeechTime = null;
           let lastSpeechTime = null;
           const SPEECH_THRESHOLD = 3;  // 3% audio volume sensitivity (catches quiet microphones)
-          const SILENCE_MS = 2500;     // 2.5s silence after speaking before auto-submitting
-          const MIN_SPEECH_MS = 800;   // At least 0.8s of speech before silence detection can trigger
+          const SILENCE_MS = 1400;     // 1.4s natural conversational pause before auto-submitting
+          const MIN_SPEECH_MS = 600;   // At least 0.6s of speech before silence detection can trigger
 
           const checkLevel = () => {
             if (!streamRef.current) return;
@@ -1339,7 +1488,7 @@ function App() {
     }
   };
 
-  const pollAvatarVideo = (talkId, boundReqId) => {
+  const pollAvatarVideo = (talkId, boundReqId, onVideoReady) => {
     const cleanId = String(talkId || "").trim();
     if (!cleanId.startsWith("tlk_")) {
       notify("Avatar response did not include a D-ID talk ID.");
@@ -1402,6 +1551,9 @@ function App() {
           }
           setAvatarVideoUrl(fullVideoUrl);
           setAvatarState("speaking");
+          if (typeof onVideoReady === "function") {
+            onVideoReady();
+          }
         } else if (statusData.status === "error") {
           clearTimeout(pollIntervalRef.current);
           pollIntervalRef.current = null;
@@ -1442,6 +1594,7 @@ function App() {
 
   const handleAvatarVideoEnded = () => {
     console.log("[VOICE-AVATAR] Avatar video finished.");
+    stopProgressiveStream(true);
     // If audio is actively playing in parallel, let audio.onended handle the completion
     if (activeAudioRef.current && !activeAudioRef.current.paused && !activeAudioRef.current.ended) {
       return;
@@ -1661,13 +1814,14 @@ function App() {
 
         if (mode === "avatar_mode") {
           const didTalkId = data?.avatar_talk_id || data?.avatar?.talk_id;
+          const pendingAssistantId = Date.now() + 1;
           setLatestUserText(userText);
-          setLatestAiResponse(aiResponse);
+          setLatestAiResponse("");
 
           setFloatingMessages((prev) => [
             ...prev,
             { id: Date.now(), role: "user", content: userText, time: now, voice: true },
-            { id: Date.now() + 1, role: "assistant", content: aiResponse, time: now, voice: true },
+            { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: true },
           ]);
 
           if (
@@ -1677,21 +1831,40 @@ function App() {
             return;
           }
 
-          if (data?.stream_talk) {
+          const triggerSpeechAndStream = () => {
             setAvatarState("speaking");
-            const estSec = Math.max(3, Math.min(45, Math.ceil(aiResponse.length / 10)));
+            startProgressiveStream({
+              fullText: aiResponse,
+              messageId: pendingAssistantId,
+            });
+          };
+
+          if (data?.stream_talk) {
+            pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
+            const estSec = Math.max(3, Math.min(60, Math.ceil(aiResponse.length / 5)));
             if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
             speechFallbackTimeoutRef.current = setTimeout(() => {
               if (currentAudioRequestIdRef.current === reqId) {
                 setAvatarState((curr) => (curr === "speaking" ? "idle" : curr));
                 setVoiceLoading(false);
                 isVoiceConversationActiveRef.current = false;
+                stopProgressiveStream(true);
               }
-            }, estSec * 1000 + 4000);
+            }, estSec * 1000 + 10000);
+
+            if (speechStartSafetyTimeoutRef.current) clearTimeout(speechStartSafetyTimeoutRef.current);
+            speechStartSafetyTimeoutRef.current = setTimeout(() => {
+              if (pendingSpeechStartCallbackRef.current) {
+                pendingSpeechStartCallbackRef.current();
+                pendingSpeechStartCallbackRef.current = null;
+              }
+            }, 950);
           } else if (typeof didTalkId === "string" && didTalkId.startsWith("tlk_")) {
             setAvatarVideoUrl(null);
             setAvatarState("preparing");
-            pollAvatarVideo(didTalkId, reqId);
+            pollAvatarVideo(didTalkId, reqId, () => {
+              triggerSpeechAndStream();
+            });
           } else {
             if (data?.audio_url) {
               const fullAudio = data.audio_url.startsWith("http") ? data.audio_url : `${API_URL}${data.audio_url}`;
@@ -1700,20 +1873,30 @@ function App() {
 
               // Real-time visible lip-sync & facial movement loop during speech
               setAvatarVideoUrl(`${API_URL}/avatar-files/response_avatar.mp4?v=${Date.now()}`);
-              setAvatarState("speaking");
 
               const cleanupVoiceAudio = () => {
                 audio.onended = null;
                 audio.onerror = null;
+                audio.onplay = null;
                 if (activeAudioRef.current === audio) activeAudioRef.current = null;
                 setAvatarVideoUrl(null);
                 setAvatarState("idle");
                 isVoiceConversationActiveRef.current = false;
+                stopProgressiveStream(true);
+              };
+              audio.onplay = () => {
+                triggerSpeechAndStream();
               };
               audio.onended = cleanupVoiceAudio;
               audio.onerror = cleanupVoiceAudio;
               audio.play().catch(cleanupVoiceAudio);
             } else {
+              setFloatingMessages((prev) =>
+                prev.map((m) =>
+                  m.id === pendingAssistantId ? { ...m, content: aiResponse, isThinking: false } : m
+                )
+              );
+              setLatestAiResponse(aiResponse);
               setAvatarVideoUrl(null);
               setAvatarState("idle");
             }
@@ -2683,7 +2866,7 @@ function AvtarPage({
               </div>
             )}
 
-            {(latestUserText || latestAiResponse) ? (
+            {(latestUserText || latestAiResponse || avatarState === "thinking" || avatarState === "preparing" || voiceLoading) ? (
               <div className="avatar-transcript-panel">
                 {latestUserText && (
                   <div className="transcript-row you-row">
@@ -2691,11 +2874,19 @@ function AvtarPage({
                     <span className="transcript-text">{latestUserText}</span>
                   </div>
                 )}
-                {latestAiResponse && (
+                {(latestAiResponse || avatarState === "thinking" || avatarState === "preparing" || voiceLoading) && (
                   <div className="transcript-row avtar-row">
                     <span className="transcript-badge avtar-badge">Avtar</span>
                     <div className="transcript-text">
-                      <FormattedMessage content={latestAiResponse} />
+                      {latestAiResponse ? (
+                        <FormattedMessage content={latestAiResponse} />
+                      ) : (
+                        <div className="streaming-thinking-dots" title="Thinking...">
+                          <span className="dot dot-1" />
+                          <span className="dot dot-2" />
+                          <span className="dot dot-3" />
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -3258,7 +3449,13 @@ function FloatingAvatarPanel({
                       {m.time && <span className="bubble-time">{m.time}</span>}
                     </div>
                     <div className="bubble-body">
-                      {m.role === "assistant" ? (
+                      {m.isThinking ? (
+                        <div className="streaming-thinking-dots" title="Thinking...">
+                          <span className="dot dot-1" />
+                          <span className="dot dot-2" />
+                          <span className="dot dot-3" />
+                        </div>
+                      ) : m.role === "assistant" ? (
                         <FormattedMessage content={m.content} />
                       ) : (
                         <span>{m.content}</span>

@@ -164,11 +164,11 @@ class DIDService:
     @staticmethod
     def expression_for_response(response_text):
         normalized = re.sub(r"\s+", " ", str(response_text or "").casefold()).strip()
-        if any(word in normalized for word in ("congratulations", "great news", "successfully", "excellent", "happy", "glad", "welcome", "pleasure", "hello", "hi")):
+        if any(word in normalized for word in ("congratulations", "great news", "successfully", "excellent", "happy", "glad", "welcome", "pleasure", "hello", "hi", "hey", "namaste", "good morning", "good afternoon", "good evening", "thank", "thanks", "dhanyawad", "shukriya", "happy to help", "certainly")):
             return "happy"
-        if any(word in normalized for word in ("sorry", "unfortunately", "concern", "problem", "unable", "error", "failed")):
+        if any(word in normalized for word in ("sorry", "unfortunately", "concern", "problem", "unable", "error", "failed", "rejected", "absent", "cannot")):
             return "serious"
-        if any(word in normalized for word in ("surprisingly", "unexpected", "wow")):
+        if any(word in normalized for word in ("surprisingly", "unexpected", "wow", "amazing")):
             return "surprise"
         return "neutral"
 

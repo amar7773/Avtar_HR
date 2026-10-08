@@ -234,6 +234,7 @@ class AvatarStreamService {
 
     switch (eventName) {
       case "stream/started":
+        this.resumeAudio();
         this.emit("streamEvent", "started", extra);
         break;
       case "stream/done":
@@ -252,9 +253,33 @@ class AvatarStreamService {
     }
   }
 
+  stopAudio() {
+    if (this.remoteStream) {
+      this.remoteStream.getAudioTracks().forEach((track) => {
+        track.enabled = false;
+      });
+    }
+  }
+
+  resumeAudio() {
+    if (this.remoteStream) {
+      this.remoteStream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+    }
+  }
+
   attachVideo(videoElement) {
     if (!videoElement) return false;
     if (this.remoteStream) {
+      if (videoElement.src) {
+        try {
+          videoElement.pause();
+          videoElement.removeAttribute("src");
+          videoElement.src = "";
+          videoElement.load();
+        } catch {}
+      }
       if (videoElement.srcObject !== this.remoteStream) {
         videoElement.srcObject = this.remoteStream;
       }

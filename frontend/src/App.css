@@ -1038,25 +1038,94 @@ textarea:focus-visible {
   border-color: rgba(124, 108, 255, 0.35);
 }
 
+/* Subtle organic micro-movement for natural idle avatar */
+@keyframes avatarIdleBreathing {
+  0% {
+    transform: scale(1) translateY(0);
+  }
+  50% {
+    transform: scale(1.008) translateY(-1.5px);
+  }
+  100% {
+    transform: scale(1) translateY(0);
+  }
+}
+
+.avatar-stage.idle .avatar-image,
+.avatar-stage.idle .avatar-video {
+  animation: avatarIdleBreathing 6s ease-in-out infinite;
+}
+
+/* Attentive listening state animation */
+@keyframes avatarListeningPulse {
+  0% {
+    box-shadow: 0 0 35px rgba(255, 83, 112, 0.25), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 55px rgba(255, 83, 112, 0.45), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 35px rgba(255, 83, 112, 0.25), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+}
+
 .avatar-stage.listening {
   border-color: rgba(255, 83, 112, 0.7);
-  box-shadow:
-    0 0 50px rgba(255, 83, 112, 0.3),
-    0 24px 60px rgba(0, 0, 0, 0.55);
+  animation: avatarListeningPulse 2.2s ease-in-out infinite;
+}
+
+.avatar-stage.listening .avatar-image,
+.avatar-stage.listening .avatar-video {
+  transform: scale(1.025) translateY(-2px);
+  transition: transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Thoughtful thinking state animation */
+@keyframes avatarThinkingGlow {
+  0% {
+    box-shadow: 0 0 35px rgba(168, 85, 247, 0.25), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 55px rgba(168, 85, 247, 0.45), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 35px rgba(168, 85, 247, 0.25), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
 }
 
 .avatar-stage.thinking {
   border-color: rgba(168, 85, 247, 0.7);
-  box-shadow:
-    0 0 50px rgba(168, 85, 247, 0.3),
-    0 24px 60px rgba(0, 0, 0, 0.55);
+  animation: avatarThinkingGlow 2s ease-in-out infinite;
+}
+
+.avatar-stage.thinking .avatar-image,
+.avatar-stage.thinking .avatar-video {
+  transform: scale(1.012) translateY(-1px) rotate(0.3deg);
+  transition: transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Confident speaking state animation */
+@keyframes avatarSpeakingAura {
+  0% {
+    box-shadow: 0 0 45px rgba(124, 108, 255, 0.3), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 70px rgba(124, 108, 255, 0.5), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 45px rgba(124, 108, 255, 0.3), 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
 }
 
 .avatar-stage.speaking {
-  border-color: rgba(124, 108, 255, 0.75);
-  box-shadow:
-    0 0 55px rgba(124, 108, 255, 0.35),
-    0 24px 60px rgba(0, 0, 0, 0.55);
+  border-color: rgba(124, 108, 255, 0.8);
+  animation: avatarSpeakingAura 1.8s ease-in-out infinite;
+}
+
+.avatar-stage.speaking .avatar-image,
+.avatar-stage.speaking .avatar-video {
+  transform: scale(1.015) translateY(0);
+  transition: transform 0.4s ease;
 }
 
 .avatar-stage.greeting {
@@ -1071,6 +1140,45 @@ textarea:focus-visible {
   box-shadow:
     0 0 40px rgba(251, 191, 36, 0.25),
     0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* Streaming thinking dots in chat bubble */
+.streaming-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+}
+
+.streaming-thinking-dots .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-primary, #7c6cff);
+  opacity: 0.4;
+  animation: thinkingDotPulse 1.4s ease-in-out infinite;
+}
+
+.streaming-thinking-dots .dot-1 {
+  animation-delay: 0s;
+}
+.streaming-thinking-dots .dot-2 {
+  animation-delay: 0.2s;
+}
+.streaming-thinking-dots .dot-3 {
+  animation-delay: 0.4s;
+}
+
+@keyframes thinkingDotPulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.25);
+    background: #a855f7;
+  }
 }
 
 .avatar-ambient-halo {

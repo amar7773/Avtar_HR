@@ -43,8 +43,9 @@ class AssistantService:
 
         self._conversation_history = {}
 
-    def process(self, user_query, employee_id):
-        history = self._conversation_history.get(str(employee_id), [])
+    def process(self, user_query, employee_id, history_channel=None):
+        channel_key = str(history_channel) if history_channel else str(employee_id)
+        history = self._conversation_history.get(channel_key, [])
         lang_mode = detect_language_mode(user_query)
 
         # 1. Near-instant small-talk handling (no RAG, no ML model inference needed)
@@ -55,7 +56,7 @@ class AssistantService:
                 conversation_history=history,
                 lang_mode=lang_mode,
             )
-            self._remember(employee_id, user_query, response)
+            self._remember(channel_key, user_query, response)
             return {
                 "user_query": user_query,
                 "language": lang_mode,
@@ -80,7 +81,7 @@ class AssistantService:
                 conversation_history=history,
                 lang_mode=lang_mode,
             )
-            self._remember(employee_id, user_query, response)
+            self._remember(channel_key, user_query, response)
             return {
                 "user_query": user_query,
                 "language": lang_mode,
@@ -104,7 +105,7 @@ class AssistantService:
             conversation_history=history,
             lang_mode=lang_mode,
         )
-        self._remember(employee_id, user_query, result["response"])
+        self._remember(channel_key, user_query, result["response"])
 
         return {
             "user_query": user_query,
@@ -118,8 +119,8 @@ class AssistantService:
             "rag_context": context,
         }
 
-    def _remember(self, employee_id, user_query, response):
-        history = self._conversation_history.setdefault(str(employee_id), [])
+    def _remember(self, key, user_query, response):
+        history = self._conversation_history.setdefault(str(key), [])
         history.extend([
             {"role": "user", "content": user_query},
             {"role": "assistant", "content": response},
@@ -154,7 +155,8 @@ class AssistantService:
             raise ValueError("Speech transcription returned no text; no avatar talk was created.")
 
         stt_lang = getattr(self.stt_service, "last_detected_language", None)
-        result = self.process(user_query=user_text.strip(), employee_id=employee_id)
+        history_channel = f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
+        result = self.process(user_query=user_text.strip(), employee_id=employee_id, history_channel=history_channel)
 
         detected_lang = result.get("language") or detect_language_mode(user_text.strip(), hint=stt_lang)
         result["language"] = detected_lang
@@ -194,7 +196,8 @@ class AssistantService:
     def process_text(
         self, user_query, employee_id, mode="text_mode", stream_id=None, session_id=None
     ):
-        result = self.process(user_query=user_query, employee_id=employee_id)
+        history_channel = f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
+        result = self.process(user_query=user_query, employee_id=employee_id, history_channel=history_channel)
         response_text = (result.get("response") or "").strip()
         result["response"] = response_text
         result["mode"] = mode
