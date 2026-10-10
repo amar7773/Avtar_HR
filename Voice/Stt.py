@@ -68,5 +68,7 @@ class STTService:
 
             return text
 
+        except ValueError:
+            raise
         except Exception as e:
             raise RuntimeError(f"ElevenLabs STT failed: {e}") from e

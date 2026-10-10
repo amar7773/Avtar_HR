@@ -1,9 +1,42 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import avatarStreamService from "./services/avatarStreamService";
+import { sharedLiveAvatarService, LiveAvatarController, logMediaDiagnostics, unlockBrowserAudio } from "./services/liveAvatarService";
 
 const API_URL =
   import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+
+const GREETING_TEXT =
+  "Hi, I am your AI employee assistant. How can I help you today?";
+
+const DEFAULT_GREETING_QUICK_OPTIONS = [
+  { label: "📅 My attendance", query: "Show my attendance" },
+  { label: "🌴 My leave balance", query: "What is my leave balance?" },
+  { label: "👤 My profile", query: "Show my complete employee profile details" },
+];
+
+let cachedGreetingPcmBuffer = null;
+let greetingPcmPromise = null;
+function getGreetingPcmBuffer(apiUrl) {
+  if (cachedGreetingPcmBuffer) return Promise.resolve(cachedGreetingPcmBuffer);
+  if (!greetingPcmPromise) {
+    greetingPcmPromise = fetch(`${apiUrl}/voice-files/greeting_24k.pcm`)
+      .then((res) => (res.ok ? res.arrayBuffer() : null))
+      .then((buf) => {
+        if (buf && buf.byteLength > 0) {
+          cachedGreetingPcmBuffer = buf;
+          console.log(`[GREETING] Preloaded canonical greeting PCM (${buf.byteLength} bytes).`);
+        }
+        return cachedGreetingPcmBuffer;
+      })
+      .catch((err) => {
+        console.warn("[GREETING] Preload greeting PCM notice:", err);
+        return null;
+      });
+  }
+  return greetingPcmPromise;
+}
+getGreetingPcmBuffer(API_URL);
 
 const QUICK_ACTIONS = [
   {
@@ -240,6 +273,16 @@ function App() {
     return sessionStorage.getItem("floating_avatar_open") === "true";
   });
   const floatingAvatarOpenRef = useRef(floatingAvatarOpen);
+  const mainLiveAvatarControllerRef = useRef(sharedLiveAvatarService);
+  const mainLiveAvatarVideoRef = useRef(null);
+  const mainGreetingPlayedRef = useRef(false);
+  const [mainLiveAvatarConnected, setMainLiveAvatarConnected] = useState(false);
+  const [needsUserActivation, setNeedsUserActivation] = useState(false);
+  const [isSessionExpired, setIsSessionExpired] = useState(false);
+  const [liveAvatarPreviewUrl, setLiveAvatarPreviewUrl] = useState(
+    "https://files2.heygen.ai/avatar/v3/582ee8fe072a48fda3bc68241aeff660_45660/preview_target.webp"
+  );
+  const [liveAvatarName, setLiveAvatarName] = useState("Avtar");
   const [floatingPanelInput, setFloatingPanelInput] = useState("");
   const [floatingMessages, setFloatingMessages] = useState(() => {
     const id = localStorage.getItem("employee_id");
@@ -254,6 +297,203 @@ function App() {
       return [];
     }
   });
+
+  const [mainAvatarMessages, setMainAvatarMessages] = useState(() => {
+    const id = localStorage.getItem("employee_id");
+    if (!id) return [];
+    try {
+      return JSON.parse(
+        localStorage.getItem(`main_avatar_chat_${id}`) || "[]"
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [isContinuousListening, setIsContinuousListening] = useState(true);
+  const isContinuousListeningRef = useRef(true);
+  useEffect(() => {
+    isContinuousListeningRef.current = isContinuousListening;
+  }, [isContinuousListening]);
+
+  const isRecordingRef = useRef(false);
+  const isVoiceLoadingRef = useRef(false);
+  const isAvatarSpeakingRef = useRef(false);
+
+  useEffect(() => {
+    const id = localStorage.getItem("employee_id");
+    if (id) {
+      localStorage.setItem(`main_avatar_chat_${id}`, JSON.stringify(mainAvatarMessages));
+    }
+  }, [mainAvatarMessages]);
+
+  const avatarStateRef = useRef(avatarState);
+  useEffect(() => {
+    avatarStateRef.current = avatarState;
+  }, [avatarState]);
+
+  const startContinuousListeningRef = useRef(null);
+
+  const startContinuousListening = () => {
+    if (activePageRef.current !== "avtar") return;
+    if (!isContinuousListeningRef.current) return;
+    if (isAvatarSpeakingRef.current) return;
+    if (avatarStateRef.current === "speaking" || avatarStateRef.current === "greeting") return;
+    if (isSubmittingVoiceRef.current || isVoiceLoadingRef.current) return;
+    if (isRecordingRef.current) return;
+
+    console.log("[CONTINUOUS-LIVE] Auto-starting continuous voice capture on avtar page...");
+    startVoiceAI("avatar_mode");
+  };
+
+  useEffect(() => {
+    startContinuousListeningRef.current = startContinuousListening;
+  });
+
+  const toggleContinuousMic = () => {
+    if (activePageRef.current !== "avtar") return;
+    if (isContinuousListeningRef.current) {
+      console.log("[CONTINUOUS-LIVE] Pausing continuous listening...");
+      isContinuousListeningRef.current = false;
+      setIsContinuousListening(false);
+      stopRecording();
+      notify("Live microphone paused.");
+    } else {
+      console.log("[CONTINUOUS-LIVE] Resuming continuous listening...");
+      isContinuousListeningRef.current = true;
+      setIsContinuousListening(true);
+      notify("Live microphone active. Speak naturally.");
+      startContinuousListeningRef.current?.();
+    }
+  };
+
+  const clearMainAvatarHistory = () => {
+    if (!window.confirm("Are you sure you want to clear the conversation messages?")) {
+      return;
+    }
+    const id = localStorage.getItem("employee_id");
+    if (id) {
+      localStorage.removeItem(`main_avatar_chat_${id}`);
+    }
+    currentAudioRequestIdRef.current += 1;
+    shouldDiscardRecordingRef.current = true;
+    setMainAvatarMessages([]);
+    setLatestUserText("");
+    setLatestAiResponse("");
+    setVoiceLoading(false);
+    isVoiceLoadingRef.current = false;
+    isSubmittingVoiceRef.current = false;
+    setAvatarState((prev) => (prev === "thinking" ? "idle" : prev));
+    stopProgressiveStream(true);
+    notify("Conversation history cleared.");
+  };
+
+  const playMainGreeting = async () => {
+    if (mainGreetingPlayedRef.current) return;
+    const controller = mainLiveAvatarControllerRef.current;
+    if (!controller) return;
+
+    mainGreetingPlayedRef.current = true;
+    setNeedsUserActivation(false);
+    stopRecording();
+
+    const videoEl = mainLiveAvatarVideoRef.current;
+    if (videoEl) {
+      controller.attachVideo(videoEl);
+    }
+
+    // 1. Ensure audio playback is genuinely unlocked and active
+    await controller.ensureAudioUnlocked();
+
+    // 2. Wait until media stream is actively decoding and rendering live WebRTC frames
+    console.log("[MAIN_GREETING_SYNC] Verifying WebRTC video stream decoded and playing...");
+    await controller.waitForStreamReadyAndDecoded(videoEl, 7000);
+
+    console.log(`[TIMING] [MAIN_GREETING_START] Media rendering confirmed at ${performance.now().toFixed(2)}ms. Delivering canonical greeting PCM...`);
+
+    // 3. Register callback that ONLY fires when avatar actually starts speaking on WebRTC
+    pendingSpeechStartCallbackRef.current = () => {
+      console.log("[MAIN_GREETING_SYNC] AVATAR_SPEAK_STARTED received. Displaying greeting bubble & speaking state.");
+      setAvatarState("speaking");
+      isAvatarSpeakingRef.current = true;
+      setLatestAiResponse(GREETING_TEXT);
+      setQuickOptions(DEFAULT_GREETING_QUICK_OPTIONS);
+      stopRecording();
+
+      const greetingMsgId = `greeting-${Date.now()}`;
+      const currentTime = new Intl.DateTimeFormat("en-IN", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      }).format(new Date());
+
+      setMainAvatarMessages((prev) => {
+        if (prev.some((m) => m.content === GREETING_TEXT)) return prev;
+        return [
+          ...prev,
+          {
+            id: greetingMsgId,
+            role: "assistant",
+            content: GREETING_TEXT,
+            time: currentTime,
+            voice: true,
+          },
+        ];
+      });
+    };
+
+    // 4. Fetch preloaded greeting PCM buffer and speak
+    const pcmBuf = await getGreetingPcmBuffer(API_URL);
+
+    await controller.speakUtterance({
+      text: GREETING_TEXT,
+      pcmData: pcmBuf || cachedGreetingPcmBuffer || undefined,
+      pcmUrl: `${API_URL}/voice-files/greeting_24k.pcm`,
+      audioUrl: `${API_URL}/voice-files/greeting.mp3`,
+      requestId: "main-greeting",
+    });
+  };
+
+  const handleUserActivate = async () => {
+    await unlockBrowserAudio();
+    if (mainLiveAvatarControllerRef.current) {
+      await mainLiveAvatarControllerRef.current.ensureAudioUnlocked();
+    }
+    const videoEl = mainLiveAvatarVideoRef.current;
+    if (videoEl) {
+      videoEl.muted = false;
+      videoEl.volume = 1.0;
+      if (videoEl.paused && videoEl.srcObject) {
+        videoEl.play().catch(() => {});
+      }
+    }
+    await playMainGreeting();
+  };
+
+  const [isReconnectingLiveAvatar, setIsReconnectingLiveAvatar] = useState(false);
+
+  const handleReconnectCall = async () => {
+    setIsReconnectingLiveAvatar(true);
+    setIsSessionExpired(false);
+    mainGreetingPlayedRef.current = false;
+    setNeedsUserActivation(false);
+    setMainLiveAvatarConnected(false);
+    setHasStreamVideo(false);
+    stopRecording();
+    try {
+      console.log("[SHARED-LIVE-AVATAR] Reconnecting shared session after expiration...");
+      await sharedLiveAvatarService.stopSession({ isReconnecting: true });
+      await sharedLiveAvatarService.startSession(API_URL);
+      notify("Live Avatar call reconnected successfully!");
+    } catch (err) {
+      console.warn("[SHARED-LIVE-AVATAR] Reconnect error:", err);
+      setIsSessionExpired(true);
+      notify("Could not restart session. Please try again in a moment.");
+    } finally {
+      setIsReconnectingLiveAvatar(false);
+    }
+  };
+
   const [voiceCompact, setVoiceCompact] = useState(false);
   const [toast, setToast] = useState("");
 
@@ -262,6 +502,7 @@ function App() {
     fullText: "",
     messageId: null,
     onComplete: null,
+    channel: "floating",
   });
   const pendingSpeechStartCallbackRef = useRef(null);
   const speechStartSafetyTimeoutRef = useRef(null);
@@ -272,13 +513,21 @@ function App() {
       progressiveStreamRef.current.interval = null;
     }
     if (commitFull && progressiveStreamRef.current.fullText) {
-      const { fullText, messageId, onComplete } = progressiveStreamRef.current;
+      const { fullText, messageId, onComplete, channel } = progressiveStreamRef.current;
       if (messageId) {
-        setFloatingMessages((prev) =>
-          prev.map((m) =>
-            m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
-          )
-        );
+        if (channel === "main") {
+          setMainAvatarMessages((prev) =>
+            prev.map((m) =>
+              m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
+            )
+          );
+        } else {
+          setFloatingMessages((prev) =>
+            prev.map((m) =>
+              m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
+            )
+          );
+        }
       }
       setLatestAiResponse(fullText);
       if (onComplete) {
@@ -292,10 +541,11 @@ function App() {
       fullText: "",
       messageId: null,
       onComplete: null,
+      channel: "floating",
     };
   };
 
-  const startProgressiveStream = ({ fullText, messageId, onComplete }) => {
+  const startProgressiveStream = ({ fullText, messageId, onComplete, channel = "floating" }) => {
     stopProgressiveStream(false);
     if (!fullText) return;
 
@@ -304,31 +554,36 @@ function App() {
     let accumulatedText = "";
 
     const totalWordCount = fullText.trim().split(/\s+/).length;
-    const estSpeechDurationSec = Math.max(2.5, Math.min(45, totalWordCount / 3.0));
-    const chunkIntervalMs = 75;
-    const totalTicks = Math.max(12, Math.round((estSpeechDurationSec * 1000) / chunkIntervalMs));
+    const estSpeechDurationSec = Math.max(2.0, Math.min(45, totalWordCount / 2.6));
+    const chunkIntervalMs = 60;
+    const totalTicks = Math.max(10, Math.round((estSpeechDurationSec * 1000) / chunkIntervalMs));
     const tokensPerTick = Math.max(1, Math.ceil(words.length / totalTicks));
 
-    if (messageId) {
-      setFloatingMessages((prev) =>
-        prev.map((m) =>
-          m.id === messageId ? { ...m, content: "", isThinking: false } : m
-        )
-      );
-    }
+    const updateMsg = (txt, isThinking) => {
+      if (!messageId) return;
+      if (channel === "main") {
+        setMainAvatarMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, content: txt, isThinking } : m
+          )
+        );
+      } else {
+        setFloatingMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, content: txt, isThinking } : m
+          )
+        );
+      }
+    };
+
+    updateMsg("", false);
     setLatestAiResponse("");
 
     const interval = setInterval(() => {
       if (currentIndex >= words.length) {
         clearInterval(interval);
         progressiveStreamRef.current.interval = null;
-        if (messageId) {
-          setFloatingMessages((prev) =>
-            prev.map((m) =>
-              m.id === messageId ? { ...m, content: fullText, isThinking: false } : m
-            )
-          );
-        }
+        updateMsg(fullText, false);
         setLatestAiResponse(fullText);
         if (onComplete) {
           try {
@@ -342,13 +597,7 @@ function App() {
       currentIndex += tokensPerTick;
       accumulatedText += nextBatch;
 
-      if (messageId) {
-        setFloatingMessages((prev) =>
-          prev.map((m) =>
-            m.id === messageId ? { ...m, content: accumulatedText, isThinking: false } : m
-          )
-        );
-      }
+      updateMsg(accumulatedText, false);
       setLatestAiResponse(accumulatedText);
     }, chunkIntervalMs);
 
@@ -357,6 +606,7 @@ function App() {
       fullText,
       messageId,
       onComplete,
+      channel,
     };
   };
 
@@ -379,7 +629,7 @@ function App() {
     }
   }, [floatingMessages]);
 
-  // Fetch initial avatar image and custom status
+  // Fetch initial avatar image, LiveAvatar status, and custom status
   useEffect(() => {
     fetch(`${API_URL}/avatar/custom-info`)
       .then((res) => (res.ok ? res.json() : null))
@@ -392,17 +642,23 @@ function App() {
         }
       })
       .catch(() => {});
+
+    fetch(`${API_URL}/avatar/live/status`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.preview_url) {
+          setLiveAvatarPreviewUrl(data.preview_url);
+        }
+        if (data?.name) {
+          setLiveAvatarName(data.name);
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  // Persistent D-ID WebRTC Stream Lifecycle Management
+  // D-ID WebRTC Stream Lifecycle Management (Retained strictly as backup code only)
+  // Per requirement: Do NOT activate or auto-connect D-ID as a fallback for the main LiveAvatar session.
   useEffect(() => {
-    const isAvatarActive = activePage === "avtar" || floatingAvatarOpen;
-    if (isAvatarActive) {
-      avatarStreamService.connect(API_URL).catch((err) => {
-        console.warn("[AVATAR] WebRTC connection notice (MP4 fallback is ready if needed):", err);
-      });
-    }
-
     const unsubReady = avatarStreamService.on("streamReady", () => {
       setHasStreamVideo(true);
     });
@@ -438,7 +694,178 @@ function App() {
       unsubEvent();
       unsubState();
     };
-  }, [activePage, floatingAvatarOpen]);
+  }, []);
+
+  // Persistent Shared HeyGen LiveAvatar WebRTC Session Lifecycle
+  useEffect(() => {
+    let isMounted = true;
+    const controller = sharedLiveAvatarService;
+
+    const unsubStreamReady = async () => {
+      if (!isMounted) return;
+      setMainLiveAvatarConnected(true);
+      setHasStreamVideo(true);
+
+      const isMain = activePageRef.current === "avtar";
+      controller.setActiveAudioRole(isMain ? "main" : "floating");
+
+      const videoEl = mainLiveAvatarVideoRef.current;
+      if (videoEl && isMain) {
+        controller.attachVideo(videoEl, { role: "main" });
+      }
+
+      // HeyGen LiveAvatar One-Time Initial Greeting:
+      // Strictly wait until stream is verified decoded & audio playback is active
+      if (!mainGreetingPlayedRef.current) {
+        stopRecording();
+
+        // 1. Verify audio playback permissions
+        const audioUnlocked = await controller.ensureAudioUnlocked();
+        if (!audioUnlocked) {
+          console.warn("[MAIN_GREETING_SYNC] Audio playback deferred by browser autoplay policy. Showing interaction prompt before greeting.");
+          if (isMounted) setNeedsUserActivation(true);
+          return;
+        }
+
+        // 2. Play greeting with confirmed audio and video readiness
+        await playMainGreeting();
+      }
+    };
+    const unsubStreamReadyCleanup = controller.on("streamReady", unsubStreamReady);
+
+    const unsubSpeakStarted = (data) => {
+      if (isMounted) {
+        setAvatarState("speaking");
+        isAvatarSpeakingRef.current = true;
+        // Stop any active mic recorder so avatar's own speech is never picked up
+        stopRecording();
+        if (speechStartSafetyTimeoutRef.current) {
+          clearTimeout(speechStartSafetyTimeoutRef.current);
+          speechStartSafetyTimeoutRef.current = null;
+        }
+        if (pendingSpeechStartCallbackRef.current) {
+          pendingSpeechStartCallbackRef.current();
+          pendingSpeechStartCallbackRef.current = null;
+        }
+      }
+    };
+    const unsubSpeakStartedCleanup = controller.on("speakStarted", unsubSpeakStarted);
+
+    const unsubSpeakEnded = () => {
+      if (isMounted) {
+        setAvatarState((prev) => (prev === "speaking" || prev === "greeting" ? "idle" : prev));
+        setVoiceLoading(false);
+        isVoiceLoadingRef.current = false;
+        stopProgressiveStream(true);
+        isAvatarSpeakingRef.current = false;
+
+        // TRUE NATURAL VC CALL:
+        // Wait 400ms for room acoustics / speaker reverb to fully settle before opening mic!
+        if (
+          (activePageRef.current === "avtar" || floatingAvatarOpenRef.current) &&
+          isContinuousListeningRef.current &&
+          !isRecordingRef.current &&
+          !isVoiceLoadingRef.current
+        ) {
+          setTimeout(() => {
+            if (
+              isMounted &&
+              (activePageRef.current === "avtar" || floatingAvatarOpenRef.current) &&
+              isContinuousListeningRef.current &&
+              !isRecordingRef.current &&
+              !isVoiceLoadingRef.current &&
+              !isAvatarSpeakingRef.current
+            ) {
+              startContinuousListeningRef.current?.();
+            }
+          }, 400);
+        }
+      }
+    };
+    const unsubSpeakEndedCleanup = controller.on("speakEnded", unsubSpeakEnded);
+
+    const unsubError = (err) => {
+      console.warn("[SHARED-LIVE-AVATAR] LiveAvatar notice:", err);
+      if (isMounted) {
+        setMainLiveAvatarConnected(false);
+        setIsSessionExpired(true);
+      }
+    };
+    const unsubErrorCleanup = controller.on("error", unsubError);
+
+    const unsubDisconnected = (reason) => {
+      console.log("[SHARED-LIVE-AVATAR] Disconnected event received:", reason);
+      if (isMounted) {
+        setMainLiveAvatarConnected(false);
+        setHasStreamVideo(false);
+        setIsSessionExpired(true);
+        isAvatarSpeakingRef.current = false;
+        stopRecording();
+      }
+    };
+    const unsubDisconnectedCleanup = controller.on("disconnected", unsubDisconnected);
+
+    const unsubExpired = (reason) => {
+      console.log("[SHARED-LIVE-AVATAR] Plan duration limit expired:", reason);
+      if (isMounted) {
+        setMainLiveAvatarConnected(false);
+        setHasStreamVideo(false);
+        setIsSessionExpired(true);
+        isAvatarSpeakingRef.current = false;
+        stopRecording();
+      }
+    };
+    const unsubExpiredCleanup = controller.on("expired", unsubExpired);
+
+    // Initial connection trigger if starting on avtar page
+    if (activePage === "avtar" && !controller.isConnected()) {
+      controller.startSession(API_URL).catch((err) => {
+        console.warn("[SHARED-LIVE-AVATAR] Could not connect to LiveAvatar:", err);
+        if (isMounted) {
+          setIsSessionExpired(true);
+        }
+      });
+    } else if (controller.isConnected()) {
+      setMainLiveAvatarConnected(true);
+      setHasStreamVideo(true);
+      if (mainLiveAvatarVideoRef.current && activePage === "avtar") {
+        controller.attachVideo(mainLiveAvatarVideoRef.current, { role: "main" });
+      }
+    }
+
+    return () => {
+      isMounted = false;
+      unsubStreamReadyCleanup();
+      unsubSpeakStartedCleanup();
+      unsubSpeakEndedCleanup();
+      unsubErrorCleanup();
+      unsubDisconnectedCleanup();
+      unsubExpiredCleanup();
+    };
+  }, []);
+
+  // Shared Session Video Attachment & Audio Role Synchronization on Page Change
+  useEffect(() => {
+    const isMain = activePage === "avtar";
+    sharedLiveAvatarService.setActiveAudioRole(isMain ? "main" : "floating");
+
+    if (isMain) {
+      if (mainLiveAvatarVideoRef.current) {
+        sharedLiveAvatarService.attachVideo(mainLiveAvatarVideoRef.current, { role: "main" });
+      }
+      if (!sharedLiveAvatarService.isConnected() && !isSessionExpired) {
+        sharedLiveAvatarService.startSession(API_URL).catch(() => {
+          setIsSessionExpired(true);
+        });
+      }
+    } else {
+      if (mainLiveAvatarVideoRef.current) {
+        sharedLiveAvatarService.detachVideo(mainLiveAvatarVideoRef.current);
+      }
+    }
+  }, [activePage]);
+
+
 
   const messagesEndRef = useRef(null);
 
@@ -775,20 +1202,32 @@ function App() {
     if (!query || voiceLoading || loading || !employee) return;
     setFloatingPanelInput("");
 
+    if (recording) {
+      shouldDiscardRecordingRef.current = true;
+      stopRecording();
+    }
+
     // Text / chip interaction is not a voice conversational loop
     isVoiceConversationActiveRef.current = false;
     isGreetingActiveRef.current = false;
 
-    // Interrupt any playing audio, video, or speech immediately
+    const isLiveActive =
+      activePage === "avtar" && (mainLiveAvatarConnected || mainLiveAvatarControllerRef.current?.isConnected());
+
+    // Interrupt any playing audio, video, or speech immediately without clearing video tracks
     if (activeAudioRef.current || ttsAudioRef.current || avatarState === "speaking") {
       stopAllAudio({ resetUI: false });
     }
-    if (!hasStreamVideo) {
+    if (!isLiveActive && !hasStreamVideo) {
       setAvatarVideoUrl(null);
     }
 
     const reqId = ++currentAudioRequestIdRef.current;
     const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const isFloating = Boolean(floatingAvatarOpen && activePage !== "avtar");
+    const histChannel = isFloating
+      ? `${employee.employee_id}_avatar_floating`
+      : `${employee.employee_id}_avatar_main`;
     const pendingAssistantId = Date.now() + 1;
 
     setLatestUserText(query);
@@ -796,26 +1235,45 @@ function App() {
     setAvatarState("thinking");
     setVoiceLoading(true);
 
-    setFloatingMessages((prev) => [
-      ...prev,
-      { id: Date.now(), role: "user", content: query, time: now, voice: false },
-      { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: false },
-    ]);
+    if (isFloating) {
+      console.log(`[FLOAT_QUESTION_PROCESSING] Processing floating assistant question: "${query}" (reqId=${reqId})`);
+      setFloatingMessages((prev) => [
+        ...prev,
+        { id: Date.now(), role: "user", content: query, time: now, voice: false },
+        { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: false },
+      ]);
+    } else if (activePage === "avtar") {
+      console.log(`[MAIN_QUESTION_PROCESSING] Processing main avatar question: "${query}" (reqId=${reqId})`);
+      setMainAvatarMessages((prev) => [
+        ...prev,
+        { id: Date.now(), role: "user", content: query, time: now, voice: false },
+        { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: false },
+      ]);
+    }
 
     try {
-      const streamId = avatarStreamService.getStreamId();
-      const sessionId = avatarStreamService.getSessionId();
+      const payload = {
+        user_query: query,
+        employee_id: String(employee.employee_id),
+        mode: "avatar_mode",
+        history_channel: histChannel,
+      };
+
+      const isLiveActive = mainLiveAvatarConnected || sharedLiveAvatarService.isConnected();
+      if (isLiveActive) {
+        payload.avatar_provider = "liveavatar";
+      } else if (!isFloating) {
+        payload.stream_id = avatarStreamService.getStreamId();
+        payload.session_id = avatarStreamService.getSessionId();
+        payload.avatar_provider = "none";
+      } else {
+        payload.avatar_provider = "none";
+      }
 
       const response = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_query: query,
-          employee_id: String(employee.employee_id),
-          mode: "avatar_mode",
-          stream_id: streamId,
-          session_id: sessionId,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -833,10 +1291,66 @@ function App() {
         startProgressiveStream({
           fullText: aiResponse,
           messageId: pendingAssistantId,
+          channel: isFloating ? "floating" : "main",
         });
       };
 
-      if (data.stream_talk) {
+      // 1. Shared HeyGen LiveAvatar for both Main Talk with Avatar and Floating Panel
+      if (sharedLiveAvatarService.isConnected()) {
+        isAvatarSpeakingRef.current = true;
+        stopRecording();
+        pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
+        if (speechStartSafetyTimeoutRef.current) {
+          clearTimeout(speechStartSafetyTimeoutRef.current);
+          speechStartSafetyTimeoutRef.current = null;
+        }
+        sharedLiveAvatarService.speakUtterance({
+          text: aiResponse,
+          pcmBase64: data.pcm_base64 || null,
+          audioUrl: data.audio_url ? `${API_URL}${data.audio_url}` : null,
+          pcmUrl: data.pcm_url ? `${API_URL}${data.pcm_url}` : null,
+          requestId: reqId,
+        });
+        return;
+      }
+
+      // 2. Audio & text fallback when LiveAvatar session is not connected
+      if (isFloating) {
+        if (data.audio_url) {
+          const fullAudio = data.audio_url.startsWith("http") ? data.audio_url : `${API_URL}${data.audio_url}`;
+          const audio = new Audio(fullAudio);
+          activeAudioRef.current = audio;
+
+          const cleanupAudio = () => {
+            audio.onended = null;
+            audio.onerror = null;
+            audio.onplay = null;
+            if (activeAudioRef.current === audio) activeAudioRef.current = null;
+            stopProgressiveStream(true);
+            setAvatarState("idle");
+            setVoiceLoading(false);
+          };
+          audio.onplay = () => {
+            triggerSpeechAndStream();
+          };
+          audio.onended = cleanupAudio;
+          audio.onerror = cleanupAudio;
+          audio.play().catch(cleanupAudio);
+        } else {
+          setFloatingMessages((prev) =>
+            prev.map((m) =>
+              m.id === pendingAssistantId ? { ...m, content: aiResponse, isThinking: false } : m
+            )
+          );
+          setLatestAiResponse(aiResponse);
+          setAvatarState("idle");
+          setVoiceLoading(false);
+        }
+        return;
+      }
+
+      // 3. Fallback: D-ID WebRTC stream talk (only if provider is not liveavatar)
+      if (data.stream_talk && data?.avatar?.provider !== "liveavatar") {
         pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
         const estSec = Math.max(3, Math.min(60, Math.ceil(aiResponse.length / 5)));
         if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
@@ -926,6 +1440,7 @@ function App() {
   };
 
   const stopRecording = () => {
+    isRecordingRef.current = false;
     if (vadTimerRef.current) {
       clearTimeout(vadTimerRef.current);
       vadTimerRef.current = null;
@@ -988,13 +1503,18 @@ function App() {
     shouldDiscardRecordingRef.current = true;
     isSubmittingVoiceRef.current = false;
 
+    // Interrupt active LiveAvatar WebRTC speech only on the main avatar page
+    if (activePageRef.current === "avtar") {
+      mainLiveAvatarControllerRef.current?.interrupt();
+      avatarStreamService.stopAudio();
+    }
+
     if (speechStartSafetyTimeoutRef.current) {
       clearTimeout(speechStartSafetyTimeoutRef.current);
       speechStartSafetyTimeoutRef.current = null;
     }
     pendingSpeechStartCallbackRef.current = null;
     stopProgressiveStream(true);
-    avatarStreamService.stopAudio();
 
     // 1. Abort any active in-flight fetch requests
     if (voiceAbortControllerRef.current) {
@@ -1088,13 +1608,16 @@ function App() {
   };
 
   const stopAllAvatarActivity = () => {
+    mainLiveAvatarControllerRef.current?.interrupt();
     stopAllAudio({ resetUI: true });
     currentAudioRequestIdRef.current += 1;
     if (speechFallbackTimeoutRef.current) {
       clearTimeout(speechFallbackTimeoutRef.current);
       speechFallbackTimeoutRef.current = null;
     }
-    if (!hasStreamVideo) {
+    const isLiveActive =
+      activePageRef.current === "avtar" && (mainLiveAvatarConnected || mainLiveAvatarControllerRef.current?.isConnected());
+    if (!isLiveActive && !hasStreamVideo) {
       setAvatarVideoUrl(null);
     }
     setAvatarState("idle");
@@ -1105,17 +1628,14 @@ function App() {
   const handleOpenFloatingAvatar = () => {
     setFloatingAvatarOpen(true);
     floatingAvatarOpenRef.current = true;
-    isGreetingActiveRef.current = true;
+    isGreetingActiveRef.current = false;
     isVoiceConversationActiveRef.current = false;
-    if (!floatingMessages || floatingMessages.length === 0) {
-      triggerGreeting();
-    }
   };
 
   const handleCloseFloatingAvatar = () => {
     setFloatingAvatarOpen(false);
     floatingAvatarOpenRef.current = false;
-    stopAllAvatarActivity();
+    stopAllAudio({ resetUI: true });
   };
 
   const handleToggleFloatingAvatar = () => {
@@ -1128,27 +1648,40 @@ function App() {
 
   const handleRefreshAvatarSession = () => {
     stopAllAvatarActivity();
-    isGreetingActiveRef.current = true;
+    isGreetingActiveRef.current = false;
     isVoiceConversationActiveRef.current = false;
     clearFloatingChat();
-    triggerGreeting();
   };
 
   const clearFloatingChat = () => {
+    if (!window.confirm("Are you sure you want to clear the floating chat messages?")) {
+      return;
+    }
     const id = localStorage.getItem("employee_id");
     if (id) {
       localStorage.removeItem(`floating_avatar_chat_${id}`);
     }
     setFloatingMessages([]);
+    setFloatingPanelInput("");
     setLatestUserText("");
     setLatestAiResponse("");
-    notify("Avatar conversation cleared.");
+    notify("Floating conversation cleared.");
   };
 
   const startRecorder = async (onBlob, onBlobMode = "avatar_mode") => {
     shouldDiscardRecordingRef.current = false;
-    if (recording || loading || voiceLoading || isSubmittingVoiceRef.current) {
-      console.log("[VOICE-MIC] Recorder or submission already active, skipping start.");
+    if (
+      isRecordingRef.current ||
+      isAvatarSpeakingRef.current ||
+      isVoiceLoadingRef.current ||
+      isSubmittingVoiceRef.current
+    ) {
+      console.log("[VOICE-MIC] Recorder or active state in progress, skipping start.", {
+        recording: isRecordingRef.current,
+        speaking: isAvatarSpeakingRef.current,
+        loading: isVoiceLoadingRef.current,
+        submitting: isSubmittingVoiceRef.current,
+      });
       return;
     }
 
@@ -1159,7 +1692,7 @@ function App() {
     }
 
     try {
-      console.log("[VOICE-MIC] Requesting microphone permission...");
+      console.log("[VOICE-MIC] Requesting microphone stream with noise suppression & echo cancellation...");
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -1167,16 +1700,35 @@ function App() {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 48000,
           },
         });
       } catch (micErr) {
         console.warn("[VOICE-MIC] Enhanced audio constraints failed, using standard audio:", micErr);
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       }
+
+      // If avatar started speaking while mic was initializing, abort immediately
+      if (isAvatarSpeakingRef.current || shouldDiscardRecordingRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
       streamRef.current = stream;
+      isRecordingRef.current = true;
+      setRecording(true);
       console.log("[VOICE-MIC] Microphone stream acquired successfully:", stream.getAudioTracks().map((t) => t.label).join(", "));
 
-      // Real-time audio level analyser for live visualizer wave & VAD
+      // Voice Activity Detection (VAD) with Voice Frequency Filtering & Dynamic Ambient Floor
+      let hasSpoken = false;
+      let consecutiveSpeechFrames = 0;
+      let activeSpeechFrames = 0;
+      let firstSpeechTime = null;
+      let lastSpeechTime = null;
+      const SILENCE_MS = 680;    // Optimized 680ms natural endpointing to minimize response latency
+      const MIN_SPEECH_MS = 500;  // Minimum 500ms speech duration to count as an intentional question
+
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (AudioContextClass) {
@@ -1185,25 +1737,43 @@ function App() {
           if (audioCtx.state === "suspended") {
             await audioCtx.resume();
           }
-          console.log("[VOICE-MIC] AudioContext active, state:", audioCtx.state);
+
           const source = audioCtx.createMediaStreamSource(stream);
+
+          // Vocal Bandpass Filtering:
+          // 1. Highpass (85 Hz) rejects low room rumble, desk bumps, AC vibration
+          const highpass = audioCtx.createBiquadFilter();
+          highpass.type = "highpass";
+          highpass.frequency.setValueAtTime(85, audioCtx.currentTime);
+
+          // 2. Lowpass (3400 Hz) isolates vocal formants, rejecting high hiss and electrical whine
+          const lowpass = audioCtx.createBiquadFilter();
+          lowpass.type = "lowpass";
+          lowpass.frequency.setValueAtTime(3400, audioCtx.currentTime);
+
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 256;
-          analyser.smoothingTimeConstant = 0.3;
-          source.connect(analyser);
+          analyser.smoothingTimeConstant = 0.25;
+
+          source.connect(highpass);
+          highpass.connect(lowpass);
+          lowpass.connect(analyser);
 
           const pcmData = new Uint8Array(analyser.frequencyBinCount);
 
-          // Voice Activity Detection (VAD) for natural sentence capture
-          let hasSpoken = false;
-          let firstSpeechTime = null;
-          let lastSpeechTime = null;
-          const SPEECH_THRESHOLD = 3;  // 3% audio volume sensitivity (catches quiet microphones)
-          const SILENCE_MS = 1400;     // 1.4s natural conversational pause before auto-submitting
-          const MIN_SPEECH_MS = 600;   // At least 0.6s of speech before silence detection can trigger
+          // Adaptive Voice Activity Detection (VAD) with continuous noise floor tracking
+          let ambientNoiseFloor = 5;
+          let speechThreshold = 18;
+          let silenceThreshold = 9;
 
           const checkLevel = () => {
-            if (!streamRef.current) return;
+            if (!streamRef.current || !isRecordingRef.current) return;
+            // CRITICAL: Never listen to microphone while avatar is speaking
+            if (isAvatarSpeakingRef.current) {
+              stopRecording();
+              return;
+            }
+
             analyser.getByteFrequencyData(pcmData);
             let sum = 0;
             for (let i = 0; i < pcmData.length; i++) {
@@ -1214,34 +1784,60 @@ function App() {
             setAudioLevel(volumePercent);
 
             const now = Date.now();
-            if (volumePercent >= SPEECH_THRESHOLD) {
-              if (!hasSpoken) {
-                hasSpoken = true;
-                firstSpeechTime = now;
-                console.log(`[VOICE-VAD] Speech detected (volume: ${volumePercent}%). Listening to user question...`);
+
+            // 1. Continuous Adaptive Noise Floor Tracking (adapts during non-speech ambiance)
+            if (!hasSpoken && volumePercent < speechThreshold) {
+              ambientNoiseFloor = Math.max(3, Math.min(20, Math.round(ambientNoiseFloor * 0.95 + volumePercent * 0.05)));
+              speechThreshold = Math.max(18, Math.round(ambientNoiseFloor * 1.8 + 8));
+              silenceThreshold = Math.max(8, Math.round(ambientNoiseFloor * 1.2 + 3));
+            }
+
+            // 2. Speech Start & End Detection
+            if (volumePercent >= speechThreshold) {
+              consecutiveSpeechFrames++;
+              activeSpeechFrames++;
+              if (consecutiveSpeechFrames >= 5) { // Require 5 consecutive frames (~80ms)
+                if (!hasSpoken) {
+                  hasSpoken = true;
+                  firstSpeechTime = now;
+                  console.log(`[TIMING] [VOICE-VAD] Genuine speech turn detected (volume: ${volumePercent}%, threshold: ${speechThreshold}%). Listening to question...`);
+                }
+                lastSpeechTime = now;
               }
-              lastSpeechTime = now;
-            } else if (hasSpoken && firstSpeechTime && (now - firstSpeechTime > MIN_SPEECH_MS)) {
-              if (lastSpeechTime && (now - lastSpeechTime > SILENCE_MS)) {
-                console.log(`[VOICE-VAD] Sentence complete (${Math.round(now - lastSpeechTime)}ms pause after speaking). Submitting question...`);
-                stopRecording();
-                return;
+            } else {
+              consecutiveSpeechFrames = 0;
+              if (hasSpoken) {
+                if (volumePercent >= silenceThreshold) {
+                  // Trailing vowel or vocal resonance
+                  lastSpeechTime = now;
+                } else {
+                  // Silence
+                  const speechDuration = now - firstSpeechTime;
+                  const silenceDuration = now - lastSpeechTime;
+                  if (speechDuration >= MIN_SPEECH_MS && silenceDuration >= SILENCE_MS) {
+                    const speechEndTime = performance.now();
+                    console.log(`[TIMING] User speech-end detected at ${speechEndTime.toFixed(2)}ms (${silenceDuration}ms pause after ${speechDuration}ms speech, ${activeSpeechFrames} active frames). Finalizing turn...`);
+                    stopRecording();
+                    return;
+                  }
+                }
               }
             }
 
             animFrameRef.current = requestAnimationFrame(checkLevel);
           };
+
           animFrameRef.current = requestAnimationFrame(checkLevel);
         }
       } catch (audioCtxErr) {
         console.warn("[VOICE-MIC] AudioContext meter error:", audioCtxErr);
       }
 
-      // Max safety duration: 45 seconds
+      // Max safety duration: 35 seconds
       vadTimerRef.current = setTimeout(() => {
-        console.log("[VOICE-VAD] Maximum speech duration reached (45s). Stopping recording...");
+        console.log("[VOICE-VAD] Maximum speech duration reached (35s). Stopping recording...");
         stopRecording();
-      }, 45000);
+      }, 35000);
 
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
@@ -1262,11 +1858,15 @@ function App() {
       recorder.onerror = (event) => {
         console.error("[VOICE-MIC] Recorder error:", event);
         stopRecording();
-        notify("Microphone recording failed.");
+        notify("Microphone recording error.");
       };
 
       recorder.onstop = async () => {
-        console.log("[VOICE-MIC] MediaRecorder stopped. Processing audio chunks...");
+        console.log("[VOICE-MIC] MediaRecorder stopped. Evaluating speech turn...");
+        isRecordingRef.current = false;
+        setRecording(false);
+        setAudioLevel(0);
+
         if (vadTimerRef.current) {
           clearTimeout(vadTimerRef.current);
           vadTimerRef.current = null;
@@ -1282,18 +1882,17 @@ function App() {
           audioContextRef.current = null;
         }
         if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => {
-            track.stop();
-            track.enabled = false;
-          });
+          try {
+            streamRef.current.getTracks().forEach((track) => {
+              track.stop();
+              track.enabled = false;
+            });
+          } catch {}
           streamRef.current = null;
         }
 
-        setRecording(false);
-        setAudioLevel(0);
-
-        if (shouldDiscardRecordingRef.current) {
-          console.log("[VOICE-MIC] Discarding recording because user cancelled.");
+        if (shouldDiscardRecordingRef.current || isAvatarSpeakingRef.current) {
+          console.log("[VOICE-MIC] Discarding recording (avatar speaking or operation cancelled).");
           return;
         }
 
@@ -1302,15 +1901,62 @@ function App() {
           return;
         }
 
-        const blob = new Blob(chunks, {
-          type: mimeType,
-        });
-        console.log(`[VOICE-MIC] Audio recorded: ${blob.size} bytes (${mimeType}, mode: ${onBlobMode}).`);
+        // Section 3: If user said nothing or was just ambient noise/cough, do not send to STT
+        if (!hasSpoken || activeSpeechFrames < 15) {
+          console.log(`[VOICE-VAD] No sustained speech detected during turn (${activeSpeechFrames} active frames, likely noise/silence). Staying in live listening mode.`);
+          if (activePageRef.current === "avtar" && !isAvatarSpeakingRef.current && isContinuousListeningRef.current) {
+            setTimeout(() => {
+              if (
+                activePageRef.current === "avtar" &&
+                !isAvatarSpeakingRef.current &&
+                !isRecordingRef.current &&
+                !isVoiceLoadingRef.current &&
+                isContinuousListeningRef.current
+              ) {
+                startContinuousListeningRef.current?.();
+              }
+            }, 300);
+          }
+          return;
+        }
 
-        if (blob.size < 200) {
-          console.log("[VOICE-MIC] Recorded audio too small or empty. Returning to idle.");
-          setVoiceLoading(false);
-          setAvatarState("idle");
+        const totalSpeechDuration = (lastSpeechTime || Date.now()) - (firstSpeechTime || Date.now());
+        if (totalSpeechDuration < MIN_SPEECH_MS) {
+          console.log(`[VOICE-VAD] Speech duration too short (${totalSpeechDuration}ms, transient noise/click). Discarding.`);
+          if (activePageRef.current === "avtar" && !isAvatarSpeakingRef.current && isContinuousListeningRef.current) {
+            setTimeout(() => {
+              if (
+                activePageRef.current === "avtar" &&
+                !isAvatarSpeakingRef.current &&
+                !isRecordingRef.current &&
+                !isVoiceLoadingRef.current &&
+                isContinuousListeningRef.current
+              ) {
+                startContinuousListeningRef.current?.();
+              }
+            }, 300);
+          }
+          return;
+        }
+
+        const blob = new Blob(chunks, { type: mimeType });
+        console.log(`[TIMING] [VOICE-MIC] Audio turn finalized at ${performance.now().toFixed(2)}ms: ${blob.size} bytes (${mimeType}, mode: ${onBlobMode}). Submitting...`);
+
+        if (blob.size < 400) {
+          console.log("[VOICE-MIC] Recorded audio blob too small. Restarting listener.");
+          if (activePageRef.current === "avtar" && !isAvatarSpeakingRef.current && isContinuousListeningRef.current) {
+            setTimeout(() => {
+              if (
+                activePageRef.current === "avtar" &&
+                !isAvatarSpeakingRef.current &&
+                !isRecordingRef.current &&
+                !isVoiceLoadingRef.current &&
+                isContinuousListeningRef.current
+              ) {
+                startContinuousListeningRef.current?.();
+              }
+            }, 300);
+          }
           return;
         }
 
@@ -1324,11 +1970,11 @@ function App() {
         }
       };
 
-      recorder.start(250);
-      console.log("[VOICE-MIC] MediaRecorder started listening.");
-      setRecording(true);
+      recorder.start(100);
+      console.log("[VOICE-MIC] MediaRecorder started listening (100ms chunk slices).");
     } catch (error) {
       console.error("[VOICE-MIC] Microphone permission/init error:", error);
+      isRecordingRef.current = false;
       stopRecording();
       notify("Please allow microphone access from your browser.");
     }
@@ -1617,8 +2263,31 @@ function App() {
     isVoiceConversationActiveRef.current = false;
 
     try {
-      setAvatarState("greeting");
-      const res = await fetch(`${API_URL}/avatar/greeting`, { signal: controller.signal });
+      // Spoken live by HeyGen LiveAvatar for Main Talk with Avatar
+      if (activePageRef.current === "avtar") {
+        pendingSpeechStartCallbackRef.current = () => {
+          setAvatarState("speaking");
+          isAvatarSpeakingRef.current = true;
+          setLatestAiResponse(GREETING_TEXT);
+          setLatestUserText("");
+          setQuickOptions(DEFAULT_GREETING_QUICK_OPTIONS);
+        };
+
+        if (mainLiveAvatarControllerRef.current) {
+          mainLiveAvatarControllerRef.current.speakUtterance({
+            text: GREETING_TEXT,
+            pcmData: cachedGreetingPcmBuffer ? cachedGreetingPcmBuffer.slice(0) : undefined,
+            pcmUrl: `${API_URL}/voice-files/greeting_24k.pcm`,
+            audioUrl: `${API_URL}/voice-files/greeting.mp3`,
+            requestId: "main-greeting",
+          });
+        }
+        return;
+      }
+
+      // Legacy fallback (only if not using LiveAvatar)
+      const greetingUrl = `${API_URL}/avatar/greeting`;
+      const res = await fetch(greetingUrl, { signal: controller.signal });
       if (!res.ok) {
         const errorBody = await res.json().catch(() => ({}));
         throw new Error(errorBody.detail || "Greeting request failed.");
@@ -1642,13 +2311,7 @@ function App() {
       setLatestAiResponse(greetingText);
       setLatestUserText("");
 
-      if (data.video_url) {
-        const fullVideo = data.video_url.startsWith("http")
-          ? data.video_url
-          : `${API_URL}${data.video_url}`;
-        setAvatarVideoUrl(fullVideo);
-        setAvatarState("greeting");
-      } else if (typeof data.talk_id === "string" && data.talk_id.startsWith("tlk_")) {
+      if (typeof data.talk_id === "string" && data.talk_id.startsWith("tlk_")) {
         setAvatarVideoUrl(null);
         setAvatarState("preparing");
         pollAvatarVideo(data.talk_id, reqId);
@@ -1670,8 +2333,8 @@ function App() {
   useEffect(() => {
     activePageRef.current = activePage;
     if (activePage === "avtar") {
-      console.log("[LIFECYCLE] Entered Talking Avatar page — triggering greeting & avatar setup.");
-      triggerGreeting();
+      console.log("[LIFECYCLE] Entered Talking Avatar page — HeyGen LiveAvatar stream will speak greeting once ready.");
+      // Greeting is triggered automatically once LiveAvatar stream is ready on WebRTC
     } else if (!floatingAvatarOpenRef.current) {
       console.log("[LIFECYCLE] Left Talking Avatar page — stopping voice detection & mic completely.");
       stopAllAvatarActivity();
@@ -1705,14 +2368,19 @@ function App() {
       console.log("[VOICE-LIFECYCLE] Not on avtar page or floating panel, ignoring avatar voice start.");
       return;
     }
-    if (isSubmittingVoiceRef.current) {
-      console.log("[VOICE-MIC] Voice submission already in progress.");
+    if (isSubmittingVoiceRef.current || isRecordingRef.current || isVoiceLoadingRef.current) {
+      console.log("[VOICE-MIC] Voice submission, recording, or loading in progress, skipping start.");
       return;
     }
 
-    // Interrupt any ongoing audio/video and start capturing speech
-    stopAllAudio({ resetUI: false });
+    // Only halt audio if an external audio track is actively playing
+    if (activeAudioRef.current || ttsAudioRef.current || (mode === "voice_mode" && avatarStateRef.current === "speaking")) {
+      stopAllAudio({ resetUI: false });
+    }
+
     const reqId = ++currentAudioRequestIdRef.current;
+    shouldDiscardRecordingRef.current = false;
+
     if (activeAudioRef.current) {
       try { activeAudioRef.current.pause(); activeAudioRef.current.src = ""; } catch {}
       activeAudioRef.current = null;
@@ -1721,7 +2389,9 @@ function App() {
     if (mode === "avatar_mode") {
       isVoiceConversationActiveRef.current = true;
       isGreetingActiveRef.current = false;
-      if (!hasStreamVideo) {
+      const isLiveActive =
+        activePageRef.current === "avtar" && (mainLiveAvatarConnected || mainLiveAvatarControllerRef.current?.isConnected());
+      if (!isLiveActive && !hasStreamVideo) {
         setAvatarVideoUrl(null);
       }
       setAvatarState("listening");
@@ -1738,6 +2408,7 @@ function App() {
       }
 
       console.log(`[VOICE-API] Submitting audio to backend (${audioBlob.size} bytes, mode: ${mode})...`);
+      isVoiceLoadingRef.current = true;
       setVoiceLoading(true);
       if (mode === "avatar_mode") {
         setAvatarState("thinking");
@@ -1757,15 +2428,32 @@ function App() {
         formData.append("employee_id", String(employee.employee_id));
         formData.append("mode", mode);
         if (mode === "avatar_mode") {
-          const sId = avatarStreamService.getStreamId();
-          const sessId = avatarStreamService.getSessionId();
-          if (sId && sessId) {
-            formData.append("stream_id", sId);
-            formData.append("session_id", sessId);
+          const isFloating = Boolean(floatingAvatarOpen && activePage !== "avtar");
+          const histChannel = isFloating
+            ? `${employee.employee_id}_avatar_floating`
+            : `${employee.employee_id}_avatar_main`;
+          formData.append("history_channel", histChannel);
+
+          const isLiveActive = mainLiveAvatarConnected || sharedLiveAvatarService.isConnected();
+          if (isLiveActive) {
+            formData.append("avatar_provider", "liveavatar");
+          } else if (!isFloating) {
+            const sId = avatarStreamService.getStreamId();
+            const sessId = avatarStreamService.getSessionId();
+            if (sId && sessId) {
+              formData.append("stream_id", sId);
+              formData.append("session_id", sessId);
+            }
+            formData.append("avatar_provider", "none");
+          } else {
+            formData.append("avatar_provider", "none");
           }
         }
 
         voiceAbortControllerRef.current = new AbortController();
+
+        const tVoiceReqStart = performance.now();
+        console.log(`[TIMING] Submitting audio to /voice at ${tVoiceReqStart.toFixed(2)}ms...`);
 
         const response = await fetch(`${API_URL}/voice`, {
           method: "POST",
@@ -1782,6 +2470,8 @@ function App() {
         }
 
         const data = await response.json();
+        const tVoiceResp = performance.now();
+        console.log(`[TIMING] Backend pipeline finished in ${(tVoiceResp - tVoiceReqStart).toFixed(2)}ms (STT: ${data.timings?.stt_ms ?? "N/A"}ms | LLM: ${data.timings?.llm_ms ?? "N/A"}ms | TTS: ${data.timings?.tts_ms ?? "N/A"}ms | Total Backend: ${data.timings?.total_backend_ms ?? "N/A"}ms).`);
 
         // If request superseded or left avatar session, discard response
         if (
@@ -1799,7 +2489,30 @@ function App() {
           audio_url: data?.audio_url,
           stream_talk: data?.stream_talk,
           talk_id: data?.avatar_talk_id || data?.avatar?.talk_id,
+          no_speech: data?.no_speech,
         });
+
+        // Gracefully ignore silence, no-speech, or empty transcription
+        if (data?.no_speech || (!data?.user_text?.trim() && !data?.response?.trim())) {
+          console.log("[VOICE-API] Backend detected no speech or empty transcription. Smoothly resuming natural listening.");
+          setVoiceLoading(false);
+          isVoiceLoadingRef.current = false;
+          setAvatarState("idle");
+          if (activePageRef.current === "avtar" && isContinuousListeningRef.current && !isAvatarSpeakingRef.current) {
+            setTimeout(() => {
+              if (
+                activePageRef.current === "avtar" &&
+                !isRecordingRef.current &&
+                !isAvatarSpeakingRef.current &&
+                !isVoiceLoadingRef.current &&
+                isContinuousListeningRef.current
+              ) {
+                startContinuousListeningRef.current?.();
+              }
+            }, 300);
+          }
+          return;
+        }
 
         if (mode !== "avatar_mode" && !data?.audio_url) {
           throw new Error("Voice response did not include audio.");
@@ -1815,14 +2528,23 @@ function App() {
         if (mode === "avatar_mode") {
           const didTalkId = data?.avatar_talk_id || data?.avatar?.talk_id;
           const pendingAssistantId = Date.now() + 1;
+          const isFloating = Boolean(floatingAvatarOpen && activePage !== "avtar");
           setLatestUserText(userText);
           setLatestAiResponse("");
 
-          setFloatingMessages((prev) => [
-            ...prev,
-            { id: Date.now(), role: "user", content: userText, time: now, voice: true },
-            { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: true },
-          ]);
+          if (isFloating) {
+            setFloatingMessages((prev) => [
+              ...prev,
+              { id: Date.now(), role: "user", content: userText, time: now, voice: true },
+              { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: true },
+            ]);
+          } else if (activePageRef.current === "avtar") {
+            setMainAvatarMessages((prev) => [
+              ...prev,
+              { id: Date.now(), role: "user", content: userText, time: now, voice: true },
+              { id: pendingAssistantId, role: "assistant", content: "", isThinking: true, time: now, voice: true },
+            ]);
+          }
 
           if (
             reqId !== currentAudioRequestIdRef.current ||
@@ -1836,10 +2558,68 @@ function App() {
             startProgressiveStream({
               fullText: aiResponse,
               messageId: pendingAssistantId,
+              channel: isFloating ? "floating" : "main",
             });
           };
 
-          if (data?.stream_talk) {
+          // 1. HeyGen LiveAvatar for both Main and Floating if session is active
+          if (sharedLiveAvatarService.isConnected()) {
+            isAvatarSpeakingRef.current = true;
+            stopRecording();
+            pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
+            if (speechStartSafetyTimeoutRef.current) {
+              clearTimeout(speechStartSafetyTimeoutRef.current);
+              speechStartSafetyTimeoutRef.current = null;
+            }
+            sharedLiveAvatarService.speakUtterance({
+              text: aiResponse,
+              pcmBase64: data.pcm_base64 || null,
+              audioUrl: data.audio_url ? `${API_URL}${data.audio_url}` : null,
+              pcmUrl: data.pcm_url ? `${API_URL}${data.pcm_url}` : null,
+              requestId: reqId,
+            });
+            return;
+          }
+
+          // 2. Floating assistant audio & text fallback (when LiveAvatar session is not active)
+          if (isFloating) {
+            if (data?.audio_url) {
+              const fullAudio = data.audio_url.startsWith("http") ? data.audio_url : `${API_URL}${data.audio_url}`;
+              const audio = new Audio(fullAudio);
+              activeAudioRef.current = audio;
+
+              const cleanupVoiceAudio = () => {
+                audio.onended = null;
+                audio.onerror = null;
+                audio.onplay = null;
+                if (activeAudioRef.current === audio) activeAudioRef.current = null;
+                setAvatarState("idle");
+                isVoiceConversationActiveRef.current = false;
+                setVoiceLoading(false);
+                stopProgressiveStream(true);
+              };
+              audio.onplay = () => {
+                triggerSpeechAndStream();
+              };
+              audio.onended = cleanupVoiceAudio;
+              audio.onerror = cleanupVoiceAudio;
+              audio.play().catch(cleanupVoiceAudio);
+            } else {
+              setFloatingMessages((prev) =>
+                prev.map((m) =>
+                  m.id === pendingAssistantId ? { ...m, content: aiResponse, isThinking: false } : m
+                )
+              );
+              setLatestAiResponse(aiResponse);
+              setAvatarState("idle");
+              setVoiceLoading(false);
+              isVoiceConversationActiveRef.current = false;
+            }
+            return;
+          }
+
+          // 3. Fallback: D-ID WebRTC stream talk (only if provider is not liveavatar)
+          if (data?.stream_talk && data?.avatar?.provider !== "liveavatar") {
             pendingSpeechStartCallbackRef.current = triggerSpeechAndStream;
             const estSec = Math.max(3, Math.min(60, Math.ceil(aiResponse.length / 5)));
             if (speechFallbackTimeoutRef.current) clearTimeout(speechFallbackTimeoutRef.current);
@@ -1986,6 +2766,7 @@ function App() {
         }
       } finally {
         setVoiceLoading(false);
+        isVoiceLoadingRef.current = false;
       }
     });
   };
@@ -2131,7 +2912,11 @@ function App() {
             />
           }
           label="Talk with Avtar"
-          onClick={() => openPage("avtar")}
+          onClick={() => {
+            unlockBrowserAudio().catch(() => {});
+            mainLiveAvatarControllerRef.current?.ensureAudioUnlocked?.().catch(() => {});
+            openPage("avtar");
+          }}
         />
 
         <NavButton
@@ -2276,7 +3061,7 @@ function App() {
 
         {activePage === "avtar" && (
           <AvtarPage
-            avatarImageUrl={avatarImageUrl}
+            avatarImageUrl={liveAvatarPreviewUrl || avatarImageUrl}
             setAvatarImageUrl={setAvatarImageUrl}
             avatarVideoUrl={avatarVideoUrl}
             avatarState={avatarState}
@@ -2296,6 +3081,19 @@ function App() {
             onReplayGreeting={triggerGreeting}
             notify={notify}
             API_URL={API_URL}
+            liveAvatarController={mainLiveAvatarControllerRef.current}
+            isLiveAvatarConnected={mainLiveAvatarConnected}
+            isSessionExpired={isSessionExpired}
+            isReconnecting={isReconnectingLiveAvatar}
+            onReconnectCall={handleReconnectCall}
+            videoRef={mainLiveAvatarVideoRef}
+            liveAvatarPreviewUrl={liveAvatarPreviewUrl}
+            messages={mainAvatarMessages}
+            isContinuousListening={isContinuousListening}
+            onToggleContinuousMic={toggleContinuousMic}
+            onClearHistory={clearMainAvatarHistory}
+            needsUserActivation={needsUserActivation}
+            onUserActivate={handleUserActivate}
           />
         )}
 
@@ -2346,11 +3144,11 @@ function App() {
         >
           <img
             className="floating-avatar-img"
-            src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+            src={liveAvatarPreviewUrl || avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
             alt="Talk with Avatar"
             onError={(e) => {
-              if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
-                e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+              if (liveAvatarPreviewUrl && e.currentTarget.src !== liveAvatarPreviewUrl) {
+                e.currentTarget.src = liveAvatarPreviewUrl;
               }
             }}
           />
@@ -2361,10 +3159,13 @@ function App() {
 
       {activePage !== "avtar" && floatingAvatarOpen && (
         <FloatingAvatarPanel
-          avatarImageUrl={avatarImageUrl}
-          avatarVideoUrl={avatarVideoUrl}
+          liveAvatarController={sharedLiveAvatarService}
+          isLiveAvatarConnected={mainLiveAvatarConnected}
+          isSessionExpired={isSessionExpired}
+          onReconnectCall={handleReconnectCall}
+          avatarImageUrl={liveAvatarPreviewUrl || avatarImageUrl}
+          API_URL={API_URL}
           avatarState={avatarState}
-          hasStreamVideo={hasStreamVideo}
           recording={recording}
           voiceLoading={voiceLoading}
           audioLevel={audioLevel}
@@ -2379,7 +3180,7 @@ function App() {
             if (recording) {
               stopRecording();
             } else if (avatarState === "speaking" || activeAudioRef.current) {
-              // Interruption: immediately stop avatar speaking and capture user's new voice
+              // Interruption: immediately stop speaking and capture user's new voice
               stopAllAvatarActivity();
               startVoiceAI("avatar_mode");
             } else if (!voiceLoading) {
@@ -2389,9 +3190,7 @@ function App() {
           onClose={handleCloseFloatingAvatar}
           onClearChat={clearFloatingChat}
           onRefresh={handleRefreshAvatarSession}
-          onVideoEnded={handleAvatarVideoEnded}
           quickOptions={quickOptions}
-          API_URL={API_URL}
         />
       )}
 
@@ -2468,158 +3267,159 @@ function CompanyLogo({ className = "" }) {
 
 function AvtarPage({
   avatarImageUrl,
-  setAvatarImageUrl,
   avatarVideoUrl,
   avatarState = "idle",
-  setAvatarVideoUrl,
-  setAvatarState,
-  hasStreamVideo = false,
   recording = false,
   voiceLoading = false,
   audioLevel = 0,
   startVoiceAI,
   stopRecording,
-  latestUserText = "",
-  latestAiResponse = "",
   onSendMessage,
-  quickOptions = [],
   onVideoEnded,
-  onReplayGreeting,
   notify,
   API_URL,
+  liveAvatarController,
+  isLiveAvatarConnected = false,
+  isSessionExpired = false,
+  isReconnecting = false,
+  onReconnectCall,
+  videoRef: externalVideoRef,
+  liveAvatarPreviewUrl,
+  messages = [],
+  isContinuousListening = true,
+  onClearHistory,
+  needsUserActivation = false,
+  onUserActivate,
 }) {
-  const videoRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const [uploadingAvatar, setUploadingAvatar] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
+  const internalVideoRef = useRef(null);
+  const videoRef = externalVideoRef || internalVideoRef;
+  const chatScrollRef = useRef(null);
   const [pageInput, setPageInput] = useState("");
+  const [isDictating, setIsDictating] = useState(false);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const dictationRecorderRef = useRef(null);
 
-  const isCustomAvatar = Boolean(
-    avatarImageUrl &&
-      (avatarImageUrl.includes("custom_avatar") ||
-        avatarImageUrl.includes("custom-avatar"))
-  );
-
-  useEffect(() => {
-    if (videoRef.current) {
-      avatarStreamService.attachVideo(videoRef.current);
-    }
-  }, [hasStreamVideo]);
-
-  const handleAvatarFileSelect = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.startsWith("image/")) {
-      notify?.("Please select a valid image file (JPG, PNG, WebP).");
+  const handleManualDictation = async () => {
+    if (isDictating && dictationRecorderRef.current) {
+      try {
+        dictationRecorderRef.current.stop();
+      } catch {}
       return;
     }
 
-    setUploadingAvatar(true);
-    try {
-      const formData = new FormData();
-      formData.append("image", file);
-
-      const res = await fetch(`${API_URL}/avatar/upload`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.detail || "Avatar upload failed.");
-      }
-
-      const data = await res.json();
-      const updatedUrl = data.browser_url.startsWith("http")
-        ? data.browser_url
-        : `${API_URL}${data.browser_url}?t=${Date.now()}`;
-
-      setAvatarImageUrl?.(updatedUrl);
-      notify?.("Custom avatar updated successfully!");
-      // Cleanly reconnect persistent WebRTC stream with new avatar
-      avatarStreamService.reconnect(API_URL).catch(() => {});
-      if (onReplayGreeting) {
-        setTimeout(() => {
-          onReplayGreeting();
-        }, 350);
-      }
-    } catch (err) {
-      console.error("[AVATAR] Upload error:", err);
-      notify?.(err.message || "Failed to upload custom avatar.");
-    } finally {
-      setUploadingAvatar(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+    if (voiceLoading || avatarState === "speaking") {
+      notify?.("Please wait until avatar finishes speaking.");
+      return;
     }
-  };
 
-  const handleResetAvatar = async () => {
-    setUploadingAvatar(true);
+    // Temporarily halt background mic capture while dictating into input box
+    stopRecording?.();
+    setIsDictating(true);
+    notify?.("Dictating... Speak into your microphone.");
+
     try {
-      const res = await fetch(`${API_URL}/avatar/reset`, { method: "POST" });
-      if (!res.ok) throw new Error("Reset failed.");
-      setAvatarImageUrl?.(`${API_URL}/avatar-files/avtar_img.jpg`);
-      notify?.("Avatar reset to default.");
-      // Cleanly reconnect persistent WebRTC stream with default avatar
-      avatarStreamService.reconnect(API_URL).catch(() => {});
-      if (onReplayGreeting) {
-        setTimeout(() => {
-          onReplayGreeting();
-        }, 350);
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      dictationRecorderRef.current = recorder;
+      const chunks = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setIsDictating(false);
+        dictationRecorderRef.current = null;
+
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        if (blob.size < 300) {
+          startVoiceAI?.();
+          return;
+        }
+
+        try {
+          const formData = new FormData();
+          formData.append("audio", blob, "manual_dictation.webm");
+          const res = await fetch(`${API_URL}/stt`, {
+            method: "POST",
+            body: formData,
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.text) {
+              setPageInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
+            }
+          }
+        } catch (err) {
+          console.warn("[MANUAL-DICTATION] STT error:", err);
+        } finally {
+          startVoiceAI?.();
+        }
+      };
+
+      recorder.start();
+      setTimeout(() => {
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
+      }, 7000);
     } catch (err) {
-      console.error("[AVATAR] Reset error:", err);
-      notify?.("Failed to reset avatar.");
-    } finally {
-      setUploadingAvatar(false);
+      console.warn("[MANUAL-DICTATION] Failed:", err);
+      setIsDictating(false);
     }
   };
 
   useEffect(() => {
-    if (avatarVideoUrl && videoRef.current) {
-      videoRef.current.currentTime = 0;
-      videoRef.current.volume = 1.0;
-      videoRef.current.muted = false;
-      videoRef.current.loop = false;
-      setIsMuted(false);
-      const playPromise = videoRef.current.play();
-      if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          console.warn("D-ID video autoplay restricted:", err);
-          if (videoRef.current) {
-            videoRef.current.muted = true;
-            setIsMuted(true);
-            videoRef.current.play().catch((playError) => {
-              console.error("D-ID video playback failed:", playError);
-              notify?.("The generated avatar video could not be played.");
-            });
-          }
-        });
+    if (!isLiveAvatarConnected) {
+      setIsVideoPlaying(false);
+      return;
+    }
+    const checkPlaying = () => {
+      if (videoRef.current && videoRef.current.readyState >= 2 && !videoRef.current.paused) {
+        setIsVideoPlaying(true);
       }
-    } else if (!avatarVideoUrl && videoRef.current && hasStreamVideo) {
-      avatarStreamService.attachVideo(videoRef.current);
-    }
-  }, [avatarVideoUrl, hasStreamVideo, notify]);
+    };
+    checkPlaying();
+    const timer = setInterval(checkPlaying, 250);
+    return () => clearInterval(timer);
+  }, [isLiveAvatarConnected]);
 
-  const handleMicClick = () => {
-    if (recording) {
-      stopRecording?.();
-    } else if (!voiceLoading) {
-      startVoiceAI?.();
+  useEffect(() => {
+    if (videoRef.current && isLiveAvatarConnected && liveAvatarController) {
+      liveAvatarController.attachVideo(videoRef.current);
     }
-  };
+  }, [isLiveAvatarConnected, liveAvatarController]);
 
-  const handleVideoEnded = () => {
-    if (onVideoEnded) {
-      onVideoEnded();
-    } else {
-      setAvatarVideoUrl?.(null);
-      setAvatarState?.("idle");
+  // Auto-scroll live chat to latest message smoothly
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  };
+  }, [messages, avatarState]);
 
   const getStatusConfig = () => {
+    if (isReconnecting) {
+      return {
+        label: "Reconnecting...",
+        className: "thinking",
+        icon: "🔄",
+      };
+    }
+    if (isSessionExpired) {
+      return {
+        label: "Session Ended (2-min limit)",
+        className: "paused",
+        icon: "⏹️",
+      };
+    }
+    if (!isLiveAvatarConnected) {
+      return {
+        label: "Connecting Live Call...",
+        className: "thinking",
+        icon: "🔄",
+      };
+    }
     if (recording || avatarState === "listening") {
       return {
         label: "Listening...",
@@ -2648,17 +3448,10 @@ function AvtarPage({
         icon: "🔊",
       };
     }
-    if (avatarState === "preparing") {
-      return {
-        label: "Processing Voice & Avatar...",
-        className: "preparing",
-        icon: "⏳",
-      };
-    }
     return {
-      label: "Ready to Talk",
-      className: "idle",
-      icon: "🟢",
+      label: isContinuousListening ? "Live Call Active" : "Mic Paused",
+      className: isContinuousListening ? "idle" : "paused",
+      icon: isContinuousListening ? "🟢" : "⏸️",
     };
   };
 
@@ -2669,64 +3462,22 @@ function AvtarPage({
       <div className="avtar-card">
         {/* Header */}
         <div className="avatar-header-row">
-          <CompanyLogo className="avtar-logo-compact" />
           <div className="avatar-title-wrap">
-            <span className="eyebrow">AI EMPLOYEE ASSISTANT</span>
             <h1>Talk with Avtar</h1>
+            <p className="avatar-subtitle">Interactive real-time HR video conversation</p>
           </div>
           <div className="avatar-header-actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/webp,image/jpg"
-              style={{ display: "none" }}
-              onChange={handleAvatarFileSelect}
-            />
-            {isCustomAvatar ? (
-              <div className="avatar-custom-chip-group">
-                <span className="avatar-custom-badge" title="Custom avatar active">
-                  ✨ Custom
-                </span>
-                <button
-                  type="button"
-                  className="avatar-header-chip"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadingAvatar || recording || voiceLoading}
-                  title="Change custom photo"
-                >
-                  {uploadingAvatar ? "..." : "Change"}
-                </button>
-                <button
-                  type="button"
-                  className="avatar-header-chip"
-                  onClick={handleResetAvatar}
-                  disabled={uploadingAvatar || recording || voiceLoading}
-                  title="Reset to default avatar"
-                >
-                  ↺ Default
-                </button>
-              </div>
-            ) : (
+            {isSessionExpired && onReconnectCall && (
               <button
                 type="button"
-                className="avatar-header-chip avatar-upload-chip"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploadingAvatar || recording || voiceLoading}
-                title="Upload custom face / photo for avatar"
+                className="avatar-reconnect-header-btn"
+                onClick={onReconnectCall}
+                disabled={isReconnecting}
+                title="Start a new live avatar session"
+                id="avatar-reconnect-call-header-btn"
               >
-                <span>📷</span> {uploadingAvatar ? "Uploading..." : "Custom Avatar"}
-              </button>
-            )}
-
-            {onReplayGreeting && (
-              <button
-                type="button"
-                className="avatar-replay-chip"
-                onClick={onReplayGreeting}
-                title="Replay greeting"
-                disabled={recording || voiceLoading}
-              >
-                <span>👋</span> Replay
+                <span className={isReconnecting ? "reconnect-spin" : ""}>🔄</span>
+                <span>{isReconnecting ? "Reconnecting..." : "Reconnect Call"}</span>
               </button>
             )}
             <div className={`avatar-status-pill ${status.className}`}>
@@ -2736,320 +3487,284 @@ function AvtarPage({
           </div>
         </div>
 
-        {/* Two-column body */}
+        {/* Two-column body: Left Live Avatar Stage | Right Live Chat Panel */}
         <div className="avatar-body-row">
 
-          {/* LEFT: Avatar stage */}
+          {/* LEFT: Live Avatar Stage */}
           <div
-            className={`avatar-stage ${status.className} ${
-              (hasStreamVideo || avatarVideoUrl) ? "has-video" : ""
-            }`}
-            onClick={() => {
+            className={`avatar-stage ${status.className} has-video`}
+            onClick={async () => {
+              await unlockBrowserAudio();
+              if (liveAvatarController) {
+                await liveAvatarController.ensureAudioUnlocked();
+              }
               if (videoRef.current) {
                 videoRef.current.muted = false;
                 videoRef.current.volume = 1.0;
-                setIsMuted(false);
-                if (videoRef.current.paused) {
+                if (videoRef.current.paused && videoRef.current.srcObject) {
                   videoRef.current.play().catch(() => {});
                 }
               }
+              if (needsUserActivation && onUserActivate) {
+                onUserActivate();
+              }
             }}
-            title={avatarVideoUrl ? "Click to unmute" : ""}
+            title={needsUserActivation ? "Click to start conversation" : ""}
           >
             <div className="avatar-ambient-halo" />
 
-            <video
-              ref={videoRef}
-              className={`avatar-video ${(hasStreamVideo || avatarVideoUrl) ? "has-video" : "video-hidden"}`}
-              src={avatarVideoUrl || undefined}
-              autoPlay
-              playsInline
-              muted={isMuted}
-              loop={false}
-              onEnded={handleVideoEnded}
-              style={{
-                display: (hasStreamVideo || avatarVideoUrl) ? "block" : "none",
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                objectPosition: "center top",
+            {/* Backing crisp avatar image layer so screen is never blank */}
+            <img
+              className="avatar-image"
+              src={liveAvatarPreviewUrl || avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+              alt="Avtar"
+              onError={(e) => {
+                if (liveAvatarPreviewUrl && e.currentTarget.src !== liveAvatarPreviewUrl) {
+                  e.currentTarget.src = liveAvatarPreviewUrl;
+                } else if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
+                  e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+                }
               }}
             />
-            {isMuted && avatarVideoUrl && (
-              <button
-                type="button"
-                className="avatar-unmute-overlay-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (videoRef.current) {
-                    videoRef.current.muted = false;
-                    setIsMuted(false);
-                    videoRef.current.play().catch(() => {});
-                  }
-                }}
-              >
-                🔊 Unmute
-              </button>
-            )}
-            {(!hasStreamVideo && !avatarVideoUrl) && (
-              <img
-                className="avatar-image"
-                src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
-                alt="Avtar - AI Employee Assistant"
-                onError={(e) => {
-                  if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
-                    e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
-                  }
-                }}
-              />
+
+            {/* Live WebRTC video stream layer */}
+            <video
+              ref={videoRef}
+              className={`avatar-video ${isLiveAvatarConnected && isVideoPlaying && !isSessionExpired ? "visible" : "hidden"}`}
+              autoPlay
+              playsInline
+              muted={false}
+              loop={false}
+              onEnded={onVideoEnded}
+              onPlaying={() => setIsVideoPlaying(true)}
+              onLoadedMetadata={() => setIsVideoPlaying(true)}
+              onCanPlay={(e) => {
+                setIsVideoPlaying(true);
+                if (e.currentTarget.paused) {
+                  e.currentTarget.play().catch(() => {});
+                }
+              }}
+              onError={() => setIsVideoPlaying(false)}
+            />
+
+            {/* Subtle unified avatar live status indicator */}
+            {!isSessionExpired && (
+              <div className={`avatar-live-indicator ${status.className}`}>
+                {status.className === "speaking" && (
+                  <div className="soundwave-equalizer">
+                    <span className="bar bar-1" />
+                    <span className="bar bar-2" />
+                    <span className="bar bar-3" />
+                    <span className="bar bar-4" />
+                  </div>
+                )}
+                {status.className === "listening" && (
+                  <span className="live-pulse-dot active" />
+                )}
+                {status.className === "thinking" && (
+                  <span className="spinner-orbit" />
+                )}
+                {(status.className === "idle" || status.className === "paused") && (
+                  <span className={`live-pulse-dot ${status.className === "paused" ? "expired" : ""}`} />
+                )}
+                <span className="indicator-chip">{status.label}</span>
+              </div>
             )}
 
-            {status.className === "listening" && (
-              <div className="avatar-live-indicator listening">
-                <div className="radar-ring ring-1" />
-                <div className="radar-ring ring-2" />
-                <span className="indicator-chip">Listening...</span>
+            {/* Click to start conversation / unlock audio prompt */}
+            {needsUserActivation && !isSessionExpired && (
+              <div className="avatar-activation-overlay">
+                <button
+                  type="button"
+                  className="avatar-activation-btn"
+                  id="avatar-activate-audio-btn"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await unlockBrowserAudio();
+                    if (liveAvatarController) {
+                      await liveAvatarController.ensureAudioUnlocked();
+                    }
+                    if (videoRef.current) {
+                      videoRef.current.muted = false;
+                      videoRef.current.volume = 1.0;
+                      if (videoRef.current.paused && videoRef.current.srcObject) {
+                        videoRef.current.play().catch(() => {});
+                      }
+                    }
+                    if (onUserActivate) {
+                      onUserActivate();
+                    }
+                  }}
+                >
+                  <span className="activation-btn-icon">🔊</span>
+                  <span className="activation-btn-title">Tap to Start Conversation</span>
+                  <span className="activation-btn-sub">Click anywhere to enable voice & video</span>
+                </button>
               </div>
             )}
-            {status.className === "thinking" && (
-              <div className="avatar-live-indicator thinking">
-                <span className="spinner-orbit" />
-                <span className="indicator-chip">Processing...</span>
-              </div>
-            )}
-            {status.className === "preparing" && (
-              <div className="avatar-live-indicator thinking">
-                <span className="spinner-orbit" />
-                <span className="indicator-chip">Generating Lip-sync...</span>
-              </div>
-            )}
-            {status.className === "greeting" && (
-              <div className="avatar-live-indicator greeting">
-                <span className="sparkle-icon">✦</span>
-                <span className="indicator-chip">Greeting</span>
-              </div>
-            )}
-            {status.className === "speaking" && (
-              <div className="avatar-live-indicator speaking">
-                <div className="soundwave-equalizer">
-                  <span className="bar bar-1" />
-                  <span className="bar bar-2" />
-                  <span className="bar bar-3" />
-                  <span className="bar bar-4" />
-                  <span className="bar bar-5" />
+
+            {/* Session Ended (2-min limit) overlay card */}
+            {isSessionExpired && (
+              <div className="avatar-session-expired-overlay">
+                <div className="session-expired-card">
+                  <div className="session-expired-icon-wrap">
+                    <span className="session-expired-icon">⏳</span>
+                  </div>
+                  <div className="session-expired-pill">Free Tier Limit Reached</div>
+                  <h3>Session Ended (2-Min Limit)</h3>
+                  <p>
+                    Live avatar video sessions are limited to 2 minutes on the free tier.
+                    You can start a fresh session right away or continue chatting via text.
+                  </p>
+                  <button
+                    type="button"
+                    className="avatar-reconnect-primary-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onReconnectCall?.();
+                    }}
+                    disabled={isReconnecting}
+                    id="avatar-reconnect-stage-btn"
+                  >
+                    <span className={isReconnecting ? "reconnect-spin" : ""}>🔄</span>
+                    <span>{isReconnecting ? "Starting New Session..." : "Reconnect Live Call"}</span>
+                  </button>
                 </div>
-                <span className="indicator-chip">Speaking</span>
               </div>
             )}
           </div>
 
-          {/* RIGHT: Transcript + Mic */}
-          <div className="avatar-controls-panel">
-
-            {recording && (
-              <div className="avatar-live-visualizer">
-                <div className="visualizer-bars">
-                  {[14, 30, 50, 80, 100, 65, 45, 25, 12].map((h, i) => {
-                    const sc = Math.max(6, Math.min(28, Math.round((h * (audioLevel + 15)) / 100)));
-                    return (
-                      <span
-                        key={i}
-                        className="live-wave-bar"
-                        style={{ height: `${sc}px` }}
-                      />
-                    );
-                  })}
+          {/* RIGHT: Live Chat Panel Beside Avatar */}
+          <div className="avatar-live-chat-panel">
+            <div className="avatar-chat-top-bar">
+              <div className="avatar-chat-status-strip">
+                <div className="avatar-chat-header-title">
+                  <span className="chat-title-icon">💬</span>
+                  <h3>Live Conversation</h3>
                 </div>
-                <span className="visualizer-caption">
-                  {audioLevel > 10 ? "Speaking detected..." : "Speak now..."}
-                </span>
-              </div>
-            )}
 
-            {(latestUserText || latestAiResponse || avatarState === "thinking" || avatarState === "preparing" || voiceLoading) ? (
-              <div className="avatar-transcript-panel">
-                {latestUserText && (
-                  <div className="transcript-row you-row">
-                    <span className="transcript-badge you-badge">You</span>
-                    <span className="transcript-text">{latestUserText}</span>
-                  </div>
-                )}
-                {(latestAiResponse || avatarState === "thinking" || avatarState === "preparing" || voiceLoading) && (
-                  <div className="transcript-row avtar-row">
-                    <span className="transcript-badge avtar-badge">Avtar</span>
-                    <div className="transcript-text">
-                      {latestAiResponse ? (
-                        <FormattedMessage content={latestAiResponse} />
-                      ) : (
-                        <div className="streaming-thinking-dots" title="Thinking...">
-                          <span className="dot dot-1" />
-                          <span className="dot dot-2" />
-                          <span className="dot dot-3" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="avatar-transcript-empty">
-                <span className="transcript-empty-icon">💬</span>
-                <p>Your conversation appears here.</p>
-                <small>Tap mic and start speaking.</small>
-              </div>
-            )}
-
-            {/* What Can I Ask? Help Panel */}
-            {showHelp && (
-              <div className="avatar-help-panel">
-                <div className="help-panel-header">
-                  <span className="help-panel-icon">💡</span>
-                  <strong>What Can I Ask?</strong>
+                {/* Chat Top Actions: Reconnect + Clear Chat */}
+                <div className="avatar-chat-actions">
+                  {isSessionExpired && onReconnectCall && (
+                    <button
+                      type="button"
+                      className="avatar-pill-btn reconnect-pill"
+                      onClick={onReconnectCall}
+                      disabled={isReconnecting}
+                      title="Start a new live avatar session"
+                      id="avatar-reconnect-chat-btn"
+                    >
+                      <span className={isReconnecting ? "reconnect-spin" : ""}>🔄</span>
+                      <span>{isReconnecting ? "Reconnecting..." : "Reconnect"}</span>
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="help-close-btn"
-                    onClick={() => setShowHelp(false)}
-                    title="Close help"
+                    className="avatar-pill-btn avatar-clear-chat-pill"
+                    onClick={() => {
+                      if (window.confirm("Are you sure you want to clear the conversation messages?")) {
+                        onClearHistory?.();
+                      }
+                    }}
+                    title="Clear conversation messages"
+                    id="avatar-clear-chat-pill-btn"
                   >
-                    ✕
+                    <span>🗑️</span>
+                    <span>Clear Chat</span>
                   </button>
                 </div>
-                <div className="help-panel-grid">
-                  <div className="help-category">
-                    <span className="help-cat-label">📅 Attendance</span>
-                    <ul>
-                      <li>"Show my attendance"</li>
-                      <li>"Was I present yesterday?"</li>
-                      <li>"Meri September ki attendance batao"</li>
-                      <li>"Aaj main present tha?"</li>
-                    </ul>
-                  </div>
-                  <div className="help-category">
-                    <span className="help-cat-label">🌴 Leave</span>
-                    <ul>
-                      <li>"How many leaves do I have?"</li>
-                      <li>"Meri leave balance kya hai?"</li>
-                      <li>"Show my approved leaves"</li>
-                      <li>"Leaves kaise apply karte hain?"</li>
-                    </ul>
-                  </div>
-                  <div className="help-category">
-                    <span className="help-cat-label">👤 Profile & Shift</span>
-                    <ul>
-                      <li>"Show my profile"</li>
-                      <li>"What is my shift?"</li>
-                      <li>"Meri designation kya hai?"</li>
-                      <li>"Which branch am I in?"</li>
-                    </ul>
-                  </div>
-                  <div className="help-category">
-                    <span className="help-cat-label">🎉 Holidays</span>
-                    <ul>
-                      <li>"What are company holidays?"</li>
-                      <li>"2026 mein holidays kab hain?"</li>
-                      <li>"Is October mein holiday hai?"</li>
-                    </ul>
-                  </div>
-                </div>
-                <p className="help-panel-footer">Hindi, English ya Hinglish — kisi bhi language mein poochein! 🇮🇳</p>
               </div>
-            )}
-
-            <div className="avatar-action-deck">
-              <button
-                type="button"
-                className={`avatar-mic-trigger ${status.className}`}
-                onClick={handleMicClick}
-                disabled={voiceLoading || avatarState === "preparing"}
-                title={recording ? "Click to finish" : avatarState === "preparing" ? "Generating avatar video..." : "Click to speak"}
-              >
-                <span className="mic-trigger-icon">
-                  {recording ? "⏹" : voiceLoading || avatarState === "preparing" ? "⏳" : "🎙"}
-                </span>
-                <span className="mic-trigger-text">
-                  {recording
-                    ? "Finish Speaking"
-                    : voiceLoading
-                    ? "Thinking..."
-                    : avatarState === "preparing"
-                    ? "Generating Video..."
-                    : avatarVideoUrl || avatarState === "speaking"
-                    ? "Ask Another Question"
-                    : "Tap to Speak"}
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`avatar-help-toggle ${showHelp ? "active" : ""}`}
-                onClick={() => setShowHelp((prev) => !prev)}
-                title="What can I ask?"
-              >
-                <span>💡</span>
-                <span>What Can I Ask?</span>
-              </button>
-              <span className="avatar-hint-caption">
-                {recording
-                  ? "Tap Finish Speaking when done."
-                  : voiceLoading
-                  ? "Generating ElevenLabs voice..."
-                  : avatarState === "preparing"
-                  ? "Rendering lip-synced avatar video..."
-                  : "Hindi, English or Hinglish — any language."}
-              </span>
             </div>
 
-            {/* Quick Option Chips */}
-            {onSendMessage && quickOptions && quickOptions.length > 0 && (
-              <div className="avtar-page-quick-chips">
-                {quickOptions.map((opt, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    className="floating-quick-chip"
-                    onClick={() => onSendMessage(opt.query)}
-                    disabled={voiceLoading || avatarState === "preparing" || avatarState === "speaking"}
-                    title={`Ask: ${opt.query}`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+            {/* Live Visualizer Bar when User is Speaking Naturally */}
+            {recording && !isSessionExpired && (
+              <div className="avatar-live-visualizer-bar">
+                <span className="live-vis-dot" />
+                <span className="live-vis-label">{audioLevel > 10 ? "Speaking detected..." : "Speak naturally..."}</span>
+                <div className="visualizer-bars-mini">
+                  {[12, 24, 40, 60, 40, 20, 10].map((h, i) => {
+                    const sc = Math.max(4, Math.min(18, Math.round((h * (audioLevel + 20)) / 100)));
+                    return <span key={i} className="live-wave-bar-mini" style={{ height: `${sc}px` }} />;
+                  })}
+                </div>
               </div>
             )}
 
-            {/* Chat text message input */}
-            {onSendMessage && (
-              <form
-                className="avtar-page-text-controls"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (pageInput.trim()) {
-                    onSendMessage(pageInput.trim());
-                    setPageInput("");
-                  }
-                }}
-              >
-                <input
-                  type="text"
-                  className="floating-input-field"
-                  placeholder="Type a message or ask a question..."
-                  value={pageInput}
-                  onChange={(e) => setPageInput(e.target.value)}
-                  disabled={voiceLoading}
-                  id="avtar-page-text-input"
-                />
-                <button
-                  type="submit"
-                  className="floating-ctrl-btn floating-send-btn"
-                  disabled={!pageInput.trim() || voiceLoading || avatarState === "preparing"}
-                  title="Send message"
-                  aria-label="Send"
-                  id="avtar-page-send-btn"
-                >
-                  ➤
-                </button>
-              </form>
-            )}
+            {/* Live Chat Scrollable Messages */}
+            <div className="avatar-live-chat-messages" ref={chatScrollRef}>
+              {messages && messages.length > 0 ? (
+                messages.map((m) => (
+                  <div key={m.id} className={`avatar-chat-row ${m.role === "user" ? "user-row" : "assistant-row"}`}>
+                    <div className="avatar-chat-bubble">
+                      <div className="avatar-chat-bubble-header">
+                        <span className="chat-sender-name">{m.role === "user" ? "You" : "Avtar"}</span>
+                        {m.voice && <span className="chat-voice-tag">🎙️ Spoken</span>}
+                        {m.time && <span className="chat-time-tag">{m.time}</span>}
+                      </div>
+                      <div className="avatar-chat-bubble-content">
+                        {m.isThinking ? (
+                          <div className="streaming-thinking-dots" title="Thinking...">
+                            <span className="dot dot-1" />
+                            <span className="dot dot-2" />
+                            <span className="dot dot-3" />
+                          </div>
+                        ) : (
+                          <FormattedMessage content={m.content} />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="avatar-chat-empty">
+                  <span className="empty-chat-icon">💬</span>
+                  <h4>Live Conversation</h4>
+                  <p>Speak naturally with Avtar or type below. Responses will appear here in real time.</p>
+                </div>
+              )}
+            </div>
 
+            {/* Bottom Text Input + STT Dictation Mic Button + Send Button */}
+            <form
+              className="avatar-live-chat-input-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (pageInput.trim()) {
+                  onSendMessage?.(pageInput.trim());
+                  setPageInput("");
+                }
+              }}
+            >
+              <input
+                type="text"
+                className="avatar-live-input-box"
+                placeholder={recording ? "Listening... or type message here..." : "Type a message or speak naturally..."}
+                value={pageInput}
+                onChange={(e) => setPageInput(e.target.value)}
+                disabled={voiceLoading}
+                id="avatar-live-text-input"
+              />
+              <button
+                type="button"
+                className={`avatar-input-mic-btn ${isDictating ? "listening" : ""}`}
+                onClick={handleManualDictation}
+                title="Dictate text (Optional)"
+                aria-label="Dictate message"
+                id="avatar-input-mic-button"
+              >
+                🎙
+              </button>
+              <button
+                type="submit"
+                className="avatar-input-send-btn"
+                disabled={!pageInput.trim() || voiceLoading}
+                title="Send message"
+                aria-label="Send"
+                id="avatar-input-send-button"
+              >
+                ➤
+              </button>
+            </form>
           </div>
         </div>
       </div>
@@ -3058,10 +3773,12 @@ function AvtarPage({
 }
 
 function FloatingAvatarPanel({
+  liveAvatarController,
+  isLiveAvatarConnected = false,
+  isSessionExpired = false,
+  onReconnectCall,
   avatarImageUrl,
-  avatarVideoUrl,
   avatarState = "idle",
-  hasStreamVideo = false,
   recording = false,
   voiceLoading = false,
   audioLevel = 0,
@@ -3076,50 +3793,35 @@ function FloatingAvatarPanel({
   onClose,
   onClearChat,
   onRefresh,
-  onVideoEnded,
   quickOptions = [],
   API_URL,
 }) {
-  const videoRef = useRef(null);
   const chatEndRef = useRef(null);
   const panelRef = useRef(null);
-  const [isMuted, setIsMuted] = useState(false);
+  const floatingVideoRef = useRef(null);
   const [isMinimized, setIsMinimized] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
   const dragStartRef = useRef({ mouseX: 0, mouseY: 0, startX: 0, startY: 0 });
 
+  // Attach shared WebRTC live avatar track to floating video element
+  useEffect(() => {
+    if (!liveAvatarController || !floatingVideoRef.current) return;
+    const el = floatingVideoRef.current;
+    if (isLiveAvatarConnected) {
+      liveAvatarController.attachVideo(el, { role: "floating" });
+    }
+    return () => {
+      liveAvatarController.detachVideo(el);
+    };
+  }, [liveAvatarController, isLiveAvatarConnected]);
+
   useEffect(() => {
     if (chatEndRef.current) {
       chatEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages]);
-
-  useEffect(() => {
-    if (avatarVideoUrl && videoRef.current) {
-      videoRef.current.currentTime = 0;
-      videoRef.current.volume = 1.0;
-      const isLoopLipSync = typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4");
-      videoRef.current.muted = isLoopLipSync;
-      videoRef.current.loop = false;
-      setIsMuted(isLoopLipSync);
-
-      const p = videoRef.current.play();
-      if (p !== undefined) {
-        p.catch((err) => {
-          console.warn("Floating avatar video autoplay restricted:", err);
-          if (videoRef.current) {
-            videoRef.current.muted = true;
-            setIsMuted(true);
-            videoRef.current.play().catch(() => {});
-          }
-        });
-      }
-    } else if (!avatarVideoUrl && videoRef.current && hasStreamVideo) {
-      avatarStreamService.attachVideo(videoRef.current);
-    }
-  }, [avatarVideoUrl, hasStreamVideo, avatarState]);
 
   // Clamped dragging handlers
   const handleHeaderPointerDown = (e) => {
@@ -3182,13 +3884,7 @@ function FloatingAvatarPanel({
     if (voiceLoading || avatarState === "thinking") {
       return { className: "thinking" };
     }
-    if (avatarState === "preparing") {
-      return { className: "preparing" };
-    }
-    if (avatarState === "greeting") {
-      return { className: "greeting" };
-    }
-    if (avatarVideoUrl || avatarState === "speaking") {
+    if (avatarState === "speaking") {
       return { className: "speaking" };
     }
     return { className: "idle" };
@@ -3202,7 +3898,7 @@ function FloatingAvatarPanel({
     { label: "👤 My profile", query: "Show my complete employee profile details" },
   ];
   const activeChips = quickOptions && quickOptions.length > 0 ? quickOptions : defaultQuickOptions;
-  const isSpeakingNow = avatarState === "speaking" || avatarState === "greeting" || Boolean(avatarVideoUrl);
+  const isSpeakingNow = avatarState === "speaking";
 
   return (
     <aside
@@ -3304,70 +4000,49 @@ function FloatingAvatarPanel({
 
       {!isMinimized && (
         <>
-          {/* 2. Avatar Stage (WebRTC live stream, response video, or neutral idle avatar image) */}
+          {/* Avatar Stage: Displays real HeyGen WebRTC video stream when live session is active */}
           <div className="floating-avatar-stage-wrap">
             <div
-              className={`avatar-stage ${status.className} ${(hasStreamVideo || avatarVideoUrl) ? "has-video" : ""}`}
-              onClick={() => {
-                if (videoRef.current && avatarState === "greeting") {
-                  videoRef.current.muted = false;
-                  videoRef.current.volume = 1.0;
-                  setIsMuted(false);
-                  if (videoRef.current.paused) {
-                    videoRef.current.play().catch(() => {});
-                  }
-                }
-              }}
-              title={avatarVideoUrl ? "Click to unmute greeting or replay" : ""}
+              className={`avatar-stage ${status.className}`}
+              title="Smart HR Assistant"
+              style={{ position: "relative", overflow: "hidden" }}
             >
               <div className="avatar-ambient-halo" />
 
+              {/* Shared LiveAvatar WebRTC video element */}
               <video
-                ref={videoRef}
-                className={`avatar-video ${(hasStreamVideo || avatarVideoUrl) ? "has-video" : "video-hidden"}`}
-                src={avatarVideoUrl || undefined}
+                ref={floatingVideoRef}
+                className="floating-avatar-video"
                 autoPlay
                 playsInline
-                muted={avatarState === "speaking" && typeof avatarVideoUrl === "string" && avatarVideoUrl.includes("response_avatar.mp4")}
-                loop={false}
-                onEnded={onVideoEnded}
                 style={{
-                  display: (hasStreamVideo || avatarVideoUrl) ? "block" : "none",
+                  display: isLiveAvatarConnected ? "block" : "none",
+                  position: "absolute",
+                  inset: 0,
                   width: "100%",
                   height: "100%",
                   objectFit: "cover",
-                  objectPosition: "center top",
+                  borderRadius: "12px",
+                  zIndex: 2,
                 }}
               />
-              {isMuted && (avatarState === "greeting" || (typeof avatarVideoUrl === "string" && !avatarVideoUrl.includes("response_avatar.mp4"))) && (
-                <button
-                  type="button"
-                  className="avatar-unmute-overlay-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (videoRef.current) {
-                      videoRef.current.muted = false;
-                      videoRef.current.currentTime = 0;
-                      videoRef.current.play().catch(() => {});
-                      setIsMuted(false);
-                    }
-                  }}
-                >
-                  🔊 Unmute
-                </button>
-              )}
-              {(!hasStreamVideo && !avatarVideoUrl) && (
-                <img
-                  className="avatar-image"
-                  src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
-                  alt="Avtar - AI Employee Assistant"
-                  onError={(e) => {
-                    if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
-                      e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
-                    }
-                  }}
-                />
-              )}
+
+              {/* Crisp avatar image layer when video is connecting or idle */}
+              <img
+                className="avatar-image"
+                src={avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
+                alt="Smart HR Avatar"
+                style={{
+                  display: isLiveAvatarConnected ? "none" : "block",
+                  position: "relative",
+                  zIndex: 1,
+                }}
+                onError={(e) => {
+                  if (!e.currentTarget.src.endsWith("/avtar_img.jpg")) {
+                    e.currentTarget.src = `${API_URL}/avatar-files/avtar_img.jpg`;
+                  }
+                }}
+              />
 
               {status.className === "listening" && (
                 <div className="avatar-live-indicator listening">
@@ -3380,18 +4055,6 @@ function FloatingAvatarPanel({
                 <div className="avatar-live-indicator thinking">
                   <span className="spinner-orbit" />
                   <span className="indicator-chip">Thinking...</span>
-                </div>
-              )}
-              {status.className === "preparing" && (
-                <div className="avatar-live-indicator preparing">
-                  <span className="spinner-orbit" />
-                  <span className="indicator-chip">Processing Voice & Avatar...</span>
-                </div>
-              )}
-              {status.className === "greeting" && (
-                <div className="avatar-live-indicator greeting">
-                  <span className="sparkle-icon">✦</span>
-                  <span className="indicator-chip">Greeting</span>
                 </div>
               )}
               {status.className === "speaking" && (
@@ -3413,7 +4076,43 @@ function FloatingAvatarPanel({
                 </div>
               )}
             </div>
+
+            {isSessionExpired && onReconnectCall && (
+              <div
+                className="floating-session-expired-banner"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "6px 12px",
+                  marginTop: "6px",
+                  background: "rgba(239, 68, 68, 0.12)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  color: "#f87171",
+                }}
+              >
+                <span>Session ended (2m limit)</span>
+                <button
+                  type="button"
+                  onClick={onReconnectCall}
+                  style={{
+                    background: "#2563eb",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: "4px",
+                    padding: "3px 8px",
+                    fontSize: "11px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Reconnect
+                </button>
+              </div>
+            )}
           </div>
+
 
           {/* 3. Real-time visualizer when mic is recording */}
           {recording && (
@@ -3468,7 +4167,7 @@ function FloatingAvatarPanel({
             ) : (
               <div className="floating-chat-empty">
                 <div className="empty-avatar-icon">💬</div>
-                <strong>Talk with Smart HR Avatar</strong>
+                <strong>Smart HR Assistant</strong>
                 <p>Ask anything about leaves, attendance, shifts, or policies via voice or text.</p>
               </div>
             )}

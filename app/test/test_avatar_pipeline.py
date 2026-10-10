@@ -343,3 +343,326 @@ def test_download_requires_mp4_with_audio_and_video(tmp_path, monkeypatch):
         "https://cdn.example.test/talk.mp4", output_path
     ) == output_path
     assert output_path.read_bytes() == video_bytes
+
+
+def test_process_text_with_liveavatar_generates_elevenlabs_tts_and_stream(monkeypatch, tmp_path):
+    from app.Services.Assistant import AssistantService
+
+    service = object.__new__(AssistantService)
+    service.voice_dir = tmp_path
+    service.response_audio_path = tmp_path / "ai_response.mp3"
+    service._audio_pipeline_lock = threading.Lock()
+    service._conversation_history = {}
+
+    service.process = lambda user_query, employee_id, history_channel=None: {
+        "user_query": user_query,
+        "language": "English",
+        "response": f"Echo: {user_query}",
+    }
+
+    tts_called = {}
+    def fake_generate_speech(text, output_file):
+        tts_called["text"] = text
+        tts_called["output_file"] = output_file
+        Path(output_file).write_bytes(b"dummy mp3 data")
+        return output_file
+
+    service.tts_service = SimpleNamespace(generate_speech=fake_generate_speech)
+
+    result = service.process_text(
+        user_query="What is my salary?",
+        employee_id="101",
+        mode="avatar_mode",
+        session_id="test_sess_123",
+        avatar_provider="liveavatar",
+        history_channel="101_avatar_main",
+    )
+
+    assert result["mode"] == "avatar_mode"
+    assert tts_called["text"] == "Echo: What is my salary?"
+    assert Path(result["response_audio"]).name == "ai_response.mp3"
+    assert result["avatar"]["provider"] == "liveavatar"
+    assert result["avatar"]["is_stream"] is True
+    assert result["avatar"]["status"] == "ready"
+    assert result["avatar"]["talk_id"] is None
+
+
+def test_process_speech_to_speech_with_liveavatar(monkeypatch, tmp_path):
+    from app.Services.Assistant import AssistantService
+
+    service = object.__new__(AssistantService)
+    service.voice_dir = tmp_path
+    service.response_audio_path = tmp_path / "ai_response.mp3"
+    service._audio_pipeline_lock = threading.Lock()
+    service._conversation_history = {}
+
+    # Mock STT
+    service.stt_service = SimpleNamespace(
+        transcribe=lambda path: "Show my attendance",
+        last_detected_language="en",
+    )
+
+    # Mock process
+    service.process = lambda user_query, employee_id, history_channel=None: {
+        "user_query": user_query,
+        "language": "English",
+        "response": "You were present today.",
+    }
+
+    # Mock TTS
+    tts_called = {}
+    def fake_generate_speech(text, output_file):
+        tts_called["text"] = text
+        tts_called["output_file"] = output_file
+        Path(output_file).write_bytes(b"dummy mp3 data")
+        return output_file
+
+    service.tts_service = SimpleNamespace(generate_speech=fake_generate_speech)
+
+    dummy_audio = tmp_path / "input.webm"
+    dummy_audio.write_bytes(b"dummy webm audio")
+
+    result = service.process_speech_to_speech(
+        audio_file=str(dummy_audio),
+        employee_id="101",
+        mode="avatar_mode",
+        session_id="live_sess_456",
+        avatar_provider="liveavatar",
+        history_channel="101_avatar_floating",
+    )
+
+    assert result["mode"] == "avatar_mode"
+    assert result["user_query"] == "Show my attendance"
+    assert result["response"] == "You were present today."
+    assert tts_called["text"] == "You were present today."
+    assert result["avatar"]["provider"] == "liveavatar"
+    assert result["avatar"]["is_stream"] is True
+
+
+def test_chat_endpoint_with_liveavatar(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    fake_assistant = SimpleNamespace(
+        process_text=lambda user_query, employee_id, mode, stream_id, session_id, avatar_provider, history_channel: {
+            "user_query": user_query,
+            "response": "Hello from LiveAvatar",
+            "language": "English",
+            "avatar": {
+                "talk_id": None,
+                "status": "ready",
+                "provider": "liveavatar",
+                "session_id": session_id,
+                "is_stream": True,
+            },
+        }
+    )
+
+    monkeypatch.setattr(avatar_api, "get_assistant", lambda: fake_assistant)
+
+    client = TestClient(avatar_api.app)
+    response = client.post(
+        "/chat",
+        json={
+            "user_query": "Hello",
+            "employee_id": "101",
+            "mode": "avatar_mode",
+            "avatar_provider": "liveavatar",
+            "history_channel": "101_avatar_main",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "avatar_mode"
+    assert data["stream_talk"] is True
+    assert data["avatar"]["provider"] == "liveavatar"
+    assert data["avatar"]["status"] == "ready"
+    assert "/voice-files/ai_response.mp3" in data["audio_url"]
+
+
+def test_history_channel_isolation(tmp_path):
+    from app.Services.Assistant import AssistantService
+
+    service = object.__new__(AssistantService)
+    service.voice_dir = tmp_path
+    service.response_audio_path = tmp_path / "ai_response.mp3"
+    service._audio_pipeline_lock = threading.Lock()
+    service._conversation_history = {}
+    service._is_small_talk = staticmethod(lambda q: True)
+    service.llm_service = SimpleNamespace(
+        generate_small_talk_response=lambda user_query, **_kw: f"Answer to {user_query}"
+    )
+
+    # Calling with main avatar channel
+    res_main = service.process(
+        user_query="Hello from main",
+        employee_id="101",
+        history_channel="101_avatar_main",
+    )
+    assert "101_avatar_main" in service._conversation_history
+    assert "101_avatar_floating" not in service._conversation_history
+    assert len(service._conversation_history["101_avatar_main"]) == 2
+
+    # Calling with floating avatar channel
+    res_float = service.process(
+        user_query="Hello from floating",
+        employee_id="101",
+        history_channel="101_avatar_floating",
+    )
+    assert "101_avatar_floating" in service._conversation_history
+    assert len(service._conversation_history["101_avatar_floating"]) == 2
+    assert service._conversation_history["101_avatar_main"][0]["content"] == "Hello from main"
+    assert service._conversation_history["101_avatar_floating"][0]["content"] == "Hello from floating"
+
+
+def test_avatar_provider_none_skips_avatar_sessions(tmp_path):
+    from app.Services.Assistant import AssistantService
+
+    service = object.__new__(AssistantService)
+    service.voice_dir = tmp_path
+    service.response_audio_path = tmp_path / "ai_response.mp3"
+    service._audio_pipeline_lock = threading.Lock()
+    service._conversation_history = {}
+    service._is_small_talk = staticmethod(lambda q: True)
+    service.llm_service = SimpleNamespace(
+        generate_small_talk_response=lambda user_query, **_kw: f"Answer to {user_query}"
+    )
+    mock_audio_file = tmp_path / "mock_audio.mp3"
+    mock_audio_file.write_bytes(b"fake audio")
+    service.tts_service = SimpleNamespace(
+        generate_speech=lambda text, output_file: str(mock_audio_file)
+    )
+
+    result = service.process_text(
+        user_query="Floating question",
+        employee_id="101",
+        mode="avatar_mode",
+        avatar_provider="none",
+        history_channel="101_avatar_floating",
+    )
+
+    assert result["mode"] == "avatar_mode"
+    assert result["avatar"]["provider"] == "none"
+    assert result["avatar"]["talk_id"] is None
+    assert result["avatar"]["status"] == "idle"
+    assert result["response_audio"] == str(mock_audio_file)
+
+
+def test_process_speech_to_speech_handles_empty_transcription_gracefully(tmp_path):
+    from app.Services.Assistant import AssistantService
+
+    service = object.__new__(AssistantService)
+    service.voice_dir = tmp_path
+    service.response_audio_path = tmp_path / "ai_response.mp3"
+    service._audio_pipeline_lock = threading.Lock()
+    service._conversation_history = {}
+
+    # Mock STT returning empty text (e.g. silence or background click)
+    service.stt_service = SimpleNamespace(
+        transcribe=lambda path: "   ",
+        last_detected_language=None,
+    )
+
+    dummy_audio = tmp_path / "silence.webm"
+    dummy_audio.write_bytes(b"empty audio")
+
+    result = service.process_speech_to_speech(
+        audio_file=str(dummy_audio),
+        employee_id="101",
+        mode="avatar_mode",
+        avatar_provider="liveavatar",
+    )
+
+    assert result.get("no_speech") is True
+    assert result.get("user_query") == ""
+    assert result.get("response") == ""
+    assert result["avatar"]["status"] == "idle"
+
+
+def test_voice_endpoint_handles_no_speech_without_502(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    fake_assistant = SimpleNamespace(
+        process_speech_to_speech=lambda **kw: {
+            "no_speech": True,
+            "user_query": "",
+            "response": "",
+            "mode": "avatar_mode",
+            "avatar": {"status": "idle"},
+        }
+    )
+
+    import Api.main as main_mod
+    monkeypatch.setattr(main_mod, "get_assistant", lambda: fake_assistant)
+
+    client = TestClient(main_mod.app)
+    response = client.post(
+        "/voice",
+        data={"employee_id": "101", "mode": "avatar_mode"},
+        files={"audio": ("test.webm", b"fake audio content", "audio/webm")},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("no_speech") is True
+    assert data.get("user_text") == ""
+    assert data.get("avatar_status") == "idle"
+
+
+def test_chat_and_voice_endpoint_include_pcm_base64(monkeypatch, tmp_path):
+    import base64
+    from fastapi.testclient import TestClient
+    import Api.main as main_mod
+
+    # Setup dummy pcm file
+    fake_pcm_data = b"PCM_24K_FAKE_DATA_FOR_TESTING"
+    (main_mod.VOICE_DIR / "ai_response_24k.pcm").write_bytes(fake_pcm_data)
+    (main_mod.VOICE_DIR / "ai_response.mp3").write_bytes(b"FAKE_MP3_DATA")
+
+    fake_assistant = SimpleNamespace(
+        process_text=lambda **kw: {
+            "response": "Test response",
+            "language": "English",
+            "avatar": {"status": "ready", "provider": "liveavatar"},
+        },
+        process_speech_to_speech=lambda **kw: {
+            "user_query": "hello",
+            "response": "Test response",
+            "language": "English",
+            "response_audio": str(main_mod.VOICE_DIR / "ai_response.mp3"),
+            "avatar": {"status": "ready", "provider": "liveavatar"},
+        },
+    )
+
+    monkeypatch.setattr(main_mod, "get_assistant", lambda: fake_assistant)
+    client = TestClient(main_mod.app)
+
+    # 1. Test /chat endpoint returns pcm_base64
+    res_chat = client.post(
+        "/chat",
+        json={
+            "user_query": "hello",
+            "employee_id": "101",
+            "mode": "avatar_mode",
+            "avatar_provider": "liveavatar",
+        },
+    )
+    assert res_chat.status_code == 200
+    chat_data = res_chat.json()
+    assert "pcm_base64" in chat_data
+    assert base64.b64decode(chat_data["pcm_base64"]) == fake_pcm_data
+
+    # 2. Test /voice endpoint returns pcm_base64
+    res_voice = client.post(
+        "/voice",
+        data={"employee_id": "101", "mode": "avatar_mode", "avatar_provider": "liveavatar"},
+        files={"audio": ("test.webm", b"fake audio content", "audio/webm")},
+    )
+    assert res_voice.status_code == 200
+    voice_data = res_voice.json()
+    assert "pcm_base64" in voice_data
+    assert base64.b64decode(voice_data["pcm_base64"]) == fake_pcm_data
+
+
+
+

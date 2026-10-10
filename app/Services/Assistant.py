@@ -129,34 +129,92 @@ class AssistantService:
 
     @staticmethod
     def _is_small_talk(user_query):
-        normalized = re.sub(r"[.!?,]+", "", user_query.casefold())
+        normalized = re.sub(r"[.!?,;:\"'/\\]+", "", user_query.casefold())
         normalized = re.sub(r"\s+", " ", normalized).strip()
         tokens = {
-            "hello", "hi", "hey", "hola", "namaste", "नमस्ते", "pranam", "प्रणाम",
+            "hello", "hi", "hey", "hola", "namaste", "namaskar", "नमस्ते", "नमस्कार", "pranam", "प्रणाम",
             "ok", "okay", "theek hai", "thik hai", "theek", "thik", "ठीक", "ठीक है",
             "yes", "yeah", "yep", "haan", "ha", "हाँ",
             "no", "nope", "nah", "nahi", "nahin", "नहीं",
-            "good morning", "good evening", "good afternoon", "shubh prabhat", "शुभ प्रभात",
-            "how are you", "kaise ho", "kya haal hai", "kaisa chal raha hai", "आप कैसे हैं",
-            "thank you", "thanks", "dhanyawad", "shukriya", "धन्यवाद", "शुक्रिया",
-            "bye", "goodbye", "alvida", "अलvida", "see you",
+            "good morning", "good evening", "good afternoon", "good night", "shubh prabhat", "शुभ प्रभात",
+            "how are you", "how are you doing", "how are you today", "how do you do",
+            "kaise ho", "kya haal hai", "kaisa chal raha hai", "आप कैसे हैं", "kaise hain", "kaisa hai",
+            "thank you", "thanks", "thanks a lot", "thank you so much", "dhanyawad", "shukriya", "धन्यवाद", "शुक्रिया",
+            "bye", "goodbye", "alvida", "अलvida", "see you", "see you later",
+            "who are you", "what is your name", "what's your name", "aap kaun ho", "aap kaun hain",
+            "what can you do", "help me", "can you help me", "can you help me today", "kya aap meri madad kar sakte ho",
         }
-        return normalized in tokens
+        if normalized in tokens:
+            return True
+
+        chit_chat_phrases = [
+            "how are you", "how are you doing", "how do you do", "kaise ho", "kya haal",
+            "who are you", "what can you do", "can you help me", "help me today",
+            "good morning", "good afternoon", "good evening", "nice to meet you",
+            "what is your name", "tell me about yourself",
+        ]
+        domain_keywords = [
+            "attendance", "leave", "holiday", "profile", "salary", "shift", "branch",
+            "designation", "manager", "chutti", "tankha", "vetan", "present", "absent",
+            "punch", "check in", "check out", "balance"
+        ]
+        has_domain = any(k in normalized for k in domain_keywords)
+        if not has_domain and any(p in normalized for p in chit_chat_phrases):
+            return True
+
+        return False
 
     def process_speech_to_speech(
-        self, audio_file, employee_id, mode="avatar_mode", stream_id=None, session_id=None
+        self,
+        audio_file,
+        employee_id,
+        mode="avatar_mode",
+        stream_id=None,
+        session_id=None,
+        avatar_provider=None,
+        history_channel=None,
     ):
+        import time
+
+        t_start = time.perf_counter()
         try:
+            t_stt = time.perf_counter()
             user_text = self.stt_service.transcribe(audio_file)
+            stt_ms = round((time.perf_counter() - t_stt) * 1000, 1)
         except Exception as error:
+            err_msg = str(error).lower()
+            if any(k in err_msg for k in ("no speech detected", "empty", "invalid_audio", "corrupted")):
+                print(f"[TIMING] [SPEECH_TO_SPEECH] STT indicated silence or unplayable audio: {error}")
+                return {
+                    "no_speech": True,
+                    "user_query": "",
+                    "response": "",
+                    "mode": mode,
+                    "avatar": {"status": "idle"},
+                }
             raise RuntimeError(f"Speech transcription failed: {error}") from error
 
         if not user_text or not user_text.strip():
-            raise ValueError("Speech transcription returned no text; no avatar talk was created.")
+            print("[TIMING] [SPEECH_TO_SPEECH] Empty transcription or silence detected; returning graceful no_speech response.")
+            return {
+                "no_speech": True,
+                "user_query": "",
+                "response": "",
+                "mode": mode,
+                "avatar": {"status": "idle"},
+            }
+
+        print(f"[TIMING] STT completed in {stt_ms}ms: \"{user_text.strip()}\"")
 
         stt_lang = getattr(self.stt_service, "last_detected_language", None)
-        history_channel = f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
-        result = self.process(user_query=user_text.strip(), employee_id=employee_id, history_channel=history_channel)
+        active_history_channel = str(history_channel) if history_channel else (
+            f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
+        )
+
+        t_llm = time.perf_counter()
+        result = self.process(user_query=user_text.strip(), employee_id=employee_id, history_channel=active_history_channel)
+        llm_ms = round((time.perf_counter() - t_llm) * 1000, 1)
+        print(f"[TIMING] LLM response completion in {llm_ms}ms (intent: {result.get('intent', 'unknown')})")
 
         detected_lang = result.get("language") or detect_language_mode(user_text.strip(), hint=stt_lang)
         result["language"] = detected_lang
@@ -166,14 +224,28 @@ class AssistantService:
             raise ValueError("The AI assistant returned an empty response; no avatar talk was created.")
         result["response"] = response_text
 
+        t_tts = time.perf_counter()
         with self._audio_pipeline_lock, lock_response_audio(self.response_audio_path):
             response_audio = self.tts_service.generate_speech(
                 text=response_text,
                 output_file=str(self.response_audio_path),
             )
+            tts_ms = round((time.perf_counter() - t_tts) * 1000, 1)
+            print(f"[TIMING] TTS audio & PCM readiness in {tts_ms}ms")
+
             avatar_info = {"talk_id": None, "status": "idle", "video_url": None}
             if mode == "avatar_mode":
-                if stream_id and session_id:
+                if avatar_provider in ("none", "disabled", "audio_only"):
+                    avatar_info = {"talk_id": None, "status": "idle", "video_url": None, "provider": "none"}
+                elif avatar_provider == "liveavatar":
+                    avatar_info = {
+                        "talk_id": None,
+                        "status": "ready",
+                        "provider": "liveavatar",
+                        "session_id": session_id,
+                        "is_stream": True,
+                    }
+                elif stream_id and session_id:
                     try:
                         avatar_info = self.talk_stream_avatar(
                             stream_id=stream_id,
@@ -187,6 +259,16 @@ class AssistantService:
                 else:
                     avatar_info = self.start_avatar(response_audio, response_text)
 
+        total_backend_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        print(f"[TIMING] Total backend processing pipeline: {total_backend_ms}ms (STT: {stt_ms}ms, LLM: {llm_ms}ms, TTS: {tts_ms}ms)")
+
+        result["timings"] = {
+            "stt_ms": stt_ms,
+            "llm_ms": llm_ms,
+            "tts_ms": tts_ms,
+            "total_backend_ms": total_backend_ms,
+        }
+        result["pcm_base64"] = getattr(self.tts_service, "last_pcm_base64", None)
         result["mode"] = mode
         result["input_audio"] = audio_file
         result["response_audio"] = response_audio
@@ -194,10 +276,19 @@ class AssistantService:
         return result
 
     def process_text(
-        self, user_query, employee_id, mode="text_mode", stream_id=None, session_id=None
+        self,
+        user_query,
+        employee_id,
+        mode="text_mode",
+        stream_id=None,
+        session_id=None,
+        avatar_provider=None,
+        history_channel=None,
     ):
-        history_channel = f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
-        result = self.process(user_query=user_query, employee_id=employee_id, history_channel=history_channel)
+        active_history_channel = str(history_channel) if history_channel else (
+            f"{employee_id}_avatar" if mode == "avatar_mode" else str(employee_id)
+        )
+        result = self.process(user_query=user_query, employee_id=employee_id, history_channel=active_history_channel)
         response_text = (result.get("response") or "").strip()
         result["response"] = response_text
         result["mode"] = mode
@@ -208,7 +299,17 @@ class AssistantService:
                     text=response_text,
                     output_file=str(self.response_audio_path),
                 )
-                if stream_id and session_id:
+                if avatar_provider in ("none", "disabled", "audio_only"):
+                    avatar_info = {"talk_id": None, "status": "idle", "video_url": None, "provider": "none"}
+                elif avatar_provider == "liveavatar":
+                    avatar_info = {
+                        "talk_id": None,
+                        "status": "ready",
+                        "provider": "liveavatar",
+                        "session_id": session_id,
+                        "is_stream": True,
+                    }
+                elif stream_id and session_id:
                     try:
                         avatar_info = self.talk_stream_avatar(
                             stream_id=stream_id,
@@ -223,6 +324,7 @@ class AssistantService:
                     avatar_info = self.start_avatar(response_audio, response_text)
             result["response_audio"] = response_audio
             result["avatar"] = avatar_info
+            result["pcm_base64"] = getattr(self.tts_service, "last_pcm_base64", None)
         else:
             result["avatar"] = {"talk_id": None, "status": "idle", "video_url": None}
 

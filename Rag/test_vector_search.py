@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from sentence_transformers import SentenceTransformer
 from Rag.vectore_store import VectorStore
 

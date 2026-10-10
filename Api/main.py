@@ -125,6 +125,8 @@ class ChatRequest(BaseModel):
     mode: str = "text_mode"
     stream_id: Optional[str] = None
     session_id: Optional[str] = None
+    avatar_provider: Optional[str] = None
+    history_channel: Optional[str] = None
 
 
 class TTSRequest(BaseModel):
@@ -150,6 +152,24 @@ class StreamTalkRequest(BaseModel):
     session_id: str
     text: Optional[str] = None
     audio_url: Optional[str] = None
+
+
+class LiveAvatarSessionRequest(BaseModel):
+    avatar_id: Optional[str] = None
+    mode: str = "LITE"
+    is_sandbox: bool = False
+    quality: str = "medium"
+    language: str = "en"
+    voice_id: Optional[str] = None
+    context_id: Optional[str] = None
+
+
+class LiveAvatarStartRequest(BaseModel):
+    session_token: str
+
+
+class LiveAvatarStopRequest(BaseModel):
+    session_token: str
 
 
 def save_upload(upload: UploadFile) -> Path:
@@ -229,6 +249,8 @@ def chat(request: ChatRequest):
             mode="avatar_mode",
             stream_id=request.stream_id,
             session_id=request.session_id,
+            avatar_provider=request.avatar_provider,
+            history_channel=request.history_channel,
         )
         avatar = result.get("avatar") or {}
         if avatar.get("talk_id"):
@@ -236,12 +258,23 @@ def chat(request: ChatRequest):
             with active_talk_id_lock:
                 latest_active_talk_id = avatar["talk_id"]
 
+        pcm_base64 = None
+        pcm_file = VOICE_DIR / "ai_response_24k.pcm"
+        if pcm_file.is_file():
+            try:
+                import base64
+                pcm_base64 = base64.b64encode(pcm_file.read_bytes()).decode("ascii")
+            except Exception as e:
+                print(f"[PCM ENCODE WARNING] {e}")
+
         return {
             "mode": "avatar_mode",
             "language": result.get("language", "English"),
             "user_text": request.user_query,
             "response": result.get("response", ""),
             "audio_url": f"/voice-files/ai_response.mp3?v={uuid4().hex}",
+            "pcm_url": f"/voice-files/ai_response_24k.pcm?v={uuid4().hex}",
+            "pcm_base64": pcm_base64,
             "avatar": avatar,
             "avatar_status": avatar.get("status", "idle"),
             "avatar_talk_id": avatar.get("talk_id"),
@@ -252,7 +285,8 @@ def chat(request: ChatRequest):
 
     result = get_assistant().process(
         user_query=request.user_query,
-        employee_id=request.employee_id
+        employee_id=request.employee_id,
+        history_channel=request.history_channel or str(request.employee_id),
     )
     result["mode"] = "text_mode"
     return result
@@ -294,13 +328,23 @@ async def speech_to_text(audio: UploadFile = File(...)):
         with input_audio_path.open("wb") as file:
             file.write(await audio.read())
 
-        text = get_assistant().stt_service.transcribe(
-            str(input_audio_path)
-        )
-
-        return {
-            "text": text
-        }
+        try:
+            text = get_assistant().stt_service.transcribe(
+                str(input_audio_path)
+            )
+            return {
+                "text": text,
+                "no_speech": False,
+            }
+        except ValueError as ve:
+            if "no speech" in str(ve).lower() or "empty" in str(ve).lower():
+                return {"text": "", "no_speech": True}
+            raise HTTPException(status_code=400, detail=str(ve)) from ve
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "no speech" in err_msg or "empty" in err_msg:
+                return {"text": "", "no_speech": True}
+            raise HTTPException(status_code=502, detail=f"Speech transcription failed: {exc}") from exc
     finally:
         safe_unlink(input_audio_path)
 
@@ -312,6 +356,8 @@ async def voice(
     mode: str = Form(default="avatar_mode"),
     stream_id: Optional[str] = Form(default=None),
     session_id: Optional[str] = Form(default=None),
+    avatar_provider: Optional[str] = Form(default=None),
+    history_channel: Optional[str] = Form(default=None),
 ):
 
     input_audio_path = save_upload(audio)
@@ -326,14 +372,43 @@ async def voice(
             mode=mode,
             stream_id=stream_id,
             session_id=session_id,
+            avatar_provider=avatar_provider,
+            history_channel=history_channel,
         )
     except Exception as error:
-        raise HTTPException(
-            status_code=502,
-            detail=str(error),
-        ) from error
+        err_msg = str(error).lower()
+        if any(k in err_msg for k in ("no speech", "empty", "silence")):
+            result = {
+                "no_speech": True,
+                "user_query": "",
+                "response": "",
+                "mode": mode,
+                "avatar": {"status": "idle"},
+            }
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=str(error),
+            ) from error
     finally:
         safe_unlink(input_audio_path)
+
+    if result.get("no_speech"):
+        return {
+            "no_speech": True,
+            "mode": result.get("mode", mode),
+            "language": "English",
+            "user_text": "",
+            "response": "",
+            "audio_url": None,
+            "pcm_url": None,
+            "avatar": {"status": "idle"},
+            "avatar_status": "idle",
+            "avatar_talk_id": None,
+            "avatar_video_url": None,
+            "avatar_error": None,
+            "stream_talk": False,
+        }
 
     response_audio = result.get("response_audio")
     expected_audio = VOICE_DIR / "ai_response.mp3"
@@ -348,18 +423,31 @@ async def voice(
         with active_talk_id_lock:
             latest_active_talk_id = avatar["talk_id"]
 
+    pcm_base64 = result.get("pcm_base64")
+    if not pcm_base64:
+        pcm_file = VOICE_DIR / "ai_response_24k.pcm"
+        if pcm_file.is_file():
+            try:
+                import base64
+                pcm_base64 = base64.b64encode(pcm_file.read_bytes()).decode("ascii")
+            except Exception as e:
+                print(f"[PCM ENCODE WARNING] {e}")
+
     return {
         "mode": result.get("mode", mode),
         "language": result.get("language", "English"),
         "user_text": result.get("user_query", ""),
         "response": result.get("response", ""),
         "audio_url": f"/voice-files/ai_response.mp3?v={uuid4().hex}",
+        "pcm_url": f"/voice-files/ai_response_24k.pcm?v={uuid4().hex}",
+        "pcm_base64": pcm_base64,
         "avatar": avatar,
         "avatar_status": avatar.get("status", "idle"),
         "avatar_talk_id": avatar.get("talk_id"),
         "avatar_video_url": avatar.get("video_url"),
         "avatar_error": avatar.get("error"),
         "stream_talk": bool(avatar.get("is_stream")),
+        "timings": result.get("timings", {}),
     }
 
 
@@ -444,25 +532,56 @@ def get_avatar_info():
 
 
 @app.get("/avatar/greeting")
-def get_avatar_greeting():
+def get_avatar_greeting(provider: Optional[str] = None):
     from Avtar.avtar_config import get_avatar
+    from Avtar.LiveAvatarService import LiveAvatarService
+
+    greeting_text = "Hi, I am your AI employee assistant. How can I help you today?"
+    quick_options = [
+        {"label": "📅 My attendance", "query": "Show my attendance"},
+        {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
+        {"label": "👤 My profile", "query": "Show my complete employee profile details"},
+    ]
+
+    # HeyGen LiveAvatar Greeting: Return canonical audio & PCM without pre-rendered MP4 video
+    if provider == "liveavatar":
+        greeting_pcm_path = VOICE_DIR / "greeting_24k.pcm"
+        greeting_audio_path = VOICE_DIR / "greeting.mp3"
+        if not greeting_pcm_path.is_file() or not greeting_audio_path.is_file():
+            try:
+                get_assistant().tts_service.ensure_canonical_greeting(greeting_text)
+            except Exception as e:
+                print(f"[GREETING ENSURE NOTICE] {e}")
+        greeting_pcm_b64 = None
+        if greeting_pcm_path.is_file():
+            try:
+                import base64
+                greeting_pcm_b64 = base64.b64encode(greeting_pcm_path.read_bytes()).decode("ascii")
+            except Exception as e:
+                print(f"[GREETING PCM B64 WARNING] {e}")
+        return {
+            "text": greeting_text,
+            "audio_url": "/voice-files/greeting.mp3" if greeting_audio_path.is_file() else None,
+            "pcm_url": "/voice-files/greeting_24k.pcm" if greeting_pcm_path.is_file() else None,
+            "pcm_base64": greeting_pcm_b64,
+            "video_url": None,
+            "status": "ready",
+            "provider": "liveavatar",
+            "quick_options": quick_options,
+        }
+
     cfg = get_avatar()
     is_custom = "custom_avatar" in cfg.get("browser_url", "")
-    greeting_text = "Hi, I am your AI employee assistant. How can I help you today?"
     greeting_video_path = AVATAR_DIR / "greeting_avatar.mp4"
 
-    # For default avatar, reuse pre-rendered greeting_avatar.mp4 for instant start
+    # For default avatar without liveavatar provider, reuse pre-rendered greeting_avatar.mp4 for instant start
     if not is_custom and greeting_video_path.is_file() and greeting_video_path.stat().st_size > 10000:
         return {
             "text": greeting_text,
             "video_url": f"/avatar-files/{greeting_video_path.name}?v=greeting",
             "status": "ready",
             "talk_id": None,
-            "quick_options": [
-                {"label": "📅 My attendance", "query": "Show my attendance"},
-                {"label": "🌴 My leave balance", "query": "What is my leave balance?"},
-                {"label": "👤 My profile", "query": "Show my complete employee profile details"},
-            ],
+            "quick_options": quick_options,
         }
 
     assistant_service = get_assistant()
@@ -581,6 +700,107 @@ def delete_avatar_stream(stream_id: str, session_id: str = ""):
     except Exception:
         pass
     return {"success": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HeyGen LiveAvatar WebRTC Streaming Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/avatar/live/session")
+def create_live_avatar_session(req: Optional[LiveAvatarSessionRequest] = None):
+    """
+    Create a new HeyGen LiveAvatar session token for the frontend Web SDK.
+    API_LIVE is kept securely on the server and never exposed to the client.
+    """
+    from Avtar.LiveAvatarService import LiveAvatarService
+
+    try:
+        service = LiveAvatarService()
+        if not service.is_configured:
+            raise HTTPException(
+                status_code=503,
+                detail="HeyGen LiveAvatar is not configured (API_LIVE is missing).",
+            )
+
+        kwargs = {}
+        if req:
+            if req.avatar_id:
+                kwargs["avatar_id"] = req.avatar_id
+            if req.mode:
+                kwargs["mode"] = req.mode
+            kwargs["is_sandbox"] = req.is_sandbox
+            if req.quality:
+                kwargs["quality"] = req.quality
+            if req.language:
+                kwargs["language"] = req.language
+            if req.voice_id:
+                kwargs["voice_id"] = req.voice_id
+            if req.context_id:
+                kwargs["context_id"] = req.context_id
+
+        data = service.create_session_token(**kwargs)
+        return {
+            "success": True,
+            "session_id": data.get("session_id"),
+            "session_token": data.get("session_token"),
+            "avatar_id": data.get("avatar_id"),
+            "mode": data.get("mode"),
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+    except RuntimeError as re:
+        raise HTTPException(status_code=502, detail=str(re)) from re
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"LiveAvatar session error: {exc}") from exc
+
+
+@app.post("/avatar/live/start")
+def start_live_avatar_session(req: LiveAvatarStartRequest):
+    """
+    Start the LiveAvatar session with session_token if started from backend.
+    """
+    from Avtar.LiveAvatarService import LiveAvatarService
+
+    try:
+        service = LiveAvatarService()
+        data = service.start_session(req.session_token)
+        return {"success": True, "data": data}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/avatar/live/stop")
+def stop_live_avatar_session(req: LiveAvatarStopRequest):
+    """
+    Clean up / stop an active LiveAvatar session.
+    """
+    from Avtar.LiveAvatarService import LiveAvatarService
+
+    try:
+        service = LiveAvatarService()
+        ok = service.stop_session(req.session_token)
+        return {"success": ok}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@app.get("/avatar/live/status")
+def get_live_avatar_status():
+    """
+    Check if HeyGen LiveAvatar integration is configured and ready.
+    """
+    from Avtar.LiveAvatarService import LiveAvatarService
+
+    service = LiveAvatarService()
+    avatar_preview = "https://files2.heygen.ai/avatar/v3/582ee8fe072a48fda3bc68241aeff660_45660/preview_target.webp"
+    return {
+        "provider": "heygen_liveavatar",
+        "configured": service.is_configured,
+        "avatar_id": service.get_default_avatar_id(),
+        "name": "Avtar",
+        "preview_url": avatar_preview,
+        "status": "ready" if service.is_configured else "not_configured",
+    }
 
 
 

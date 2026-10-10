@@ -134,12 +134,12 @@ class TTSService:
             os.close(descriptor)
             temporary_path = Path(temp_name)
             try:
-                # Conversational voice settings for natural human-like cadence
+                # Fast path: Request 24kHz mono PCM directly from ElevenLabs
                 convert_kwargs = {
                     "voice_id": self.voice_id.strip(),
                     "text": spoken_text,
                     "model_id": self.model_id,
-                    "output_format": "mp3_44100_128",
+                    "output_format": "pcm_24000",
                 }
                 try:
                     from elevenlabs import VoiceSettings
@@ -147,26 +147,109 @@ class TTSService:
                         stability=0.50,
                         similarity_boost=0.75,
                         use_speaker_boost=True,
-                        speed=1.0,
+                        speed=0.92,
                     )
                 except Exception:
                     pass
 
-                audio_stream = self.client.text_to_speech.convert(**convert_kwargs)
-                with temporary_path.open("wb") as audio_file:
+                try:
+                    audio_stream = self.client.text_to_speech.convert(**convert_kwargs)
+                    raw_chunks = []
                     for chunk in audio_stream:
                         if chunk:
-                            audio_file.write(chunk)
-                self.validate_mp3(temporary_path)
-                audio_hash = hashlib.sha256(temporary_path.read_bytes()).hexdigest()
-                os.replace(temporary_path, output_path)
-                self._generated_outputs[output_path.resolve()] = (
-                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                    audio_hash,
+                            raw_chunks.append(chunk)
+                    raw_audio_bytes = b"".join(raw_chunks)
+                except Exception as stream_err:
+                    # Fallback to standard MP3 if provider does not support direct PCM
+                    convert_kwargs["output_format"] = "mp3_44100_128"
+                    audio_stream = self.client.text_to_speech.convert(**convert_kwargs)
+                    raw_chunks = []
+                    for chunk in audio_stream:
+                        if chunk:
+                            raw_chunks.append(chunk)
+                    raw_audio_bytes = b"".join(raw_chunks)
+
+                pcm_path = output_path.with_name(f"{output_path.stem}_24k.pcm")
+                ffmpeg = shutil.which("ffmpeg")
+
+                # Detect if returned bytes are MP3 (e.g. from tests or fallback) or raw PCM
+                is_mp3 = (
+                    len(raw_audio_bytes) > 4
+                    and (
+                        raw_audio_bytes[:3] == b"ID3"
+                        or (raw_audio_bytes[0] == 0xFF and (raw_audio_bytes[1] & 0xE0) == 0xE0)
+                    )
                 )
+
+                if is_mp3:
+                    # MP3 payload
+                    with temporary_path.open("wb") as audio_file:
+                        audio_file.write(raw_audio_bytes)
+                    self.validate_mp3(temporary_path)
+                    audio_hash = hashlib.sha256(raw_audio_bytes).hexdigest()
+                    os.replace(temporary_path, output_path)
+                    self._generated_outputs[output_path.resolve()] = (
+                        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        audio_hash,
+                    )
+                    # Convert MP3 to 24kHz PCM for avatar
+                    if ffmpeg and output_path.is_file():
+                        p = subprocess.run(
+                            [
+                                ffmpeg, "-y", "-i", str(output_path),
+                                "-f", "s16le", "-acodec", "pcm_s16le",
+                                "-ac", "1", "-ar", "24000",
+                                str(pcm_path),
+                            ],
+                            capture_output=True, check=False, timeout=10,
+                        )
+                        if pcm_path.is_file():
+                            pcm_bytes = pcm_path.read_bytes()
+                            import base64
+                            self.last_pcm_base64 = base64.b64encode(pcm_bytes).decode("ascii")
+                else:
+                    # Raw 24kHz 16-bit PCM payload directly from ElevenLabs
+                    pcm_bytes = raw_audio_bytes
+                    pcm_path.write_bytes(pcm_bytes)
+                    import base64
+                    self.last_pcm_base64 = base64.b64encode(pcm_bytes).decode("ascii")
+
+                    # Fast-encode PCM to MP3 using ffmpeg (-threads 4 for ~40ms speed on Windows)
+                    if ffmpeg:
+                        subprocess.run(
+                            [
+                                ffmpeg, "-y", "-threads", "4",
+                                "-f", "s16le", "-ar", "24000", "-ac", "1",
+                                "-i", str(pcm_path),
+                                "-c:a", "libmp3lame", "-b:a", "128k",
+                                str(temporary_path),
+                            ],
+                            capture_output=True, check=False, timeout=10,
+                        )
+
+                    if temporary_path.is_file() and temporary_path.stat().st_size > 0:
+                        self.validate_mp3(temporary_path)
+                        audio_hash = hashlib.sha256(temporary_path.read_bytes()).hexdigest()
+                        os.replace(temporary_path, output_path)
+                        self._generated_outputs[output_path.resolve()] = (
+                            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                            audio_hash,
+                        )
+                    else:
+                        temporary_path.write_bytes(pcm_bytes)
+                        os.replace(temporary_path, output_path)
+
                 return str(output_path)
             except Exception as error:
                 temporary_path.unlink(missing_ok=True)
                 if isinstance(error, (RuntimeError, ValueError)):
                     raise
                 raise RuntimeError(f"ElevenLabs TTS failed: {error}") from error
+
+    def ensure_canonical_greeting(self, greeting_text="Hi, I am your AI employee assistant. How can I help you today?"):
+        """Ensure greeting.mp3 and greeting_24k.pcm exist with canonical slower voice settings."""
+        greeting_mp3 = Path(__file__).resolve().parent / "greeting.mp3"
+        greeting_pcm = Path(__file__).resolve().parent / "greeting_24k.pcm"
+        if not greeting_mp3.is_file() or not greeting_pcm.is_file():
+            self.generate_speech(text=greeting_text, output_file=str(greeting_mp3))
+        return str(greeting_mp3)

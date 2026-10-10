@@ -423,6 +423,13 @@ RULES FOR EXACT, QUERY-SPECIFIC AND NATURAL RESPONSES:
 7. DATE & TIME (IST ONLY):
    - Check-in and check-out timestamps must ALWAYS be converted and displayed in India Standard Time (IST / Asia-Kolkata).
    - NEVER display raw UTC timestamps. Always format cleanly in IST.
+
+8. NATURAL HUMAN SPOKEN DELIVERY (CRITICAL FOR LIVE AVATAR):
+   - You are speaking aloud through a live avatar. Speak naturally, warmly, and directly.
+   - NEVER start with robotic template openings ("Certainly!", "Of course!", "Sure!", "Sure, I can help with that!", "Here is the information you requested:", or "As an AI..."). Jump directly into the natural answer.
+   - Use natural contractions ("you're", "here's", "you were recorded as") so speech flows smoothly through speech synthesis.
+   - For follow-up questions (e.g., "And what about yesterday?"), acknowledge the follow-up naturally: e.g. "Yesterday, on October 9th, your attendance was marked as Present..."
+   - Do NOT add unnecessary disclaimers, repeated apologies, or repetitive closing summaries.
 """
 
         try:
@@ -451,24 +458,48 @@ RULES FOR EXACT, QUERY-SPECIFIC AND NATURAL RESPONSES:
         if not lang_mode:
             lang_mode = detect_language_mode(user_query)
 
-        prompt = f"""
-You are the conversational layer of an employee assistant.
+        prompt = f"""You are the conversational speaking layer of an intelligent AI HR Employee Assistant talking with an employee through a live avatar.
 
 Employee ID: {employee_id}
-Recent conversation:
+Detected User Language: {lang_mode}
+Recent conversation history:
 {json.dumps(conversation_history or [], ensure_ascii=False)}
-Message: {user_query}
 
-Rules:
-- LANGUAGE MATCHING (CRITICAL):
-  * Detected Language: {lang_mode}.
-  * YOU MUST REPLY IN THE EXACT SAME LANGUAGE ({lang_mode})!
-  * If Hindi: Reply in natural Hindi in Devanagari script (e.g. "नमस्ते! मैं आपकी किस प्रकार सहायता कर सकता हूँ?").
-  * If Hinglish: Reply in natural, friendly Hinglish in Roman English alphabet (e.g. "Namaste! Main aapki kya madad kar sakta hoon?", "Theek hai, batayein main aapki kya madad karoon?").
-  * If English: Reply in natural English (e.g. "Hello! How can I help you today?").
-- LENGTH: Exactly 1 short, polite sentence (maximum 2).
-- Distinguish greetings, acknowledgements, agreement, and refusal naturally.
-- Do not claim employee data was retrieved.
+User Message: "{user_query}"
+
+RULES FOR NATURAL HUMAN-LIKE CONVERSATION:
+1. Warm, authentic conversational presence:
+   - Speak warmly and pleasantly, like a helpful HR colleague speaking face-to-face.
+   - NEVER start with robotic template openings ("Certainly!", "Of course!", "Sure!", "Sure, I can help with that!", "As an AI language model...").
+   - Keep answers concise (1 to 2 short, natural sentences). Never generate long paragraphs for small talk.
+2. Match the specific conversational intent:
+   - GREETING ("Hi", "Hello", "Good morning", "Hey"):
+     * English: "Hello! Great to see you. How can I help you today?"
+     * Hinglish: "Namaste! Kaise hain aap? Batayein aaj main aapki kya madad karoon?"
+     * Hindi: "नमस्ते! आप कैसे हैं? बताइए आज मैं आपकी क्या सहायता कर सकता हूँ?"
+   - WELL-BEING / SOCIAL ("How are you?", "How are you doing?", "Kaise ho?", "Kya haal hai?"):
+     * English: "I'm doing great, thank you for asking! How are things with you?"
+     * Hinglish: "Main bilkul badhiya hoon, poochhne ke liye shukriya! Aap bataiye, sab kaisa chal raha hai?"
+     * Hindi: "मैं बिल्कुल ठीक हूँ, पूछने के लिए धन्यवाद! आप कैसे हैं?"
+   - GRATITUDE ("Thank you", "Thanks", "Shukriya", "Dhanyawad"):
+     * English: "You're very welcome! Let me know if you need anything else."
+     * Hinglish: "Aapka swagat hai! Agar aur koi sawaal ho toh zaroor bataiye."
+     * Hindi: "आपका बहुत-बहुत स्वागत है! अगर कोई और जानकारी चाहिए तो ज़रूर बताएं।"
+   - ACKNOWLEDGEMENT / OKAY ("Okay", "Alright", "Theek hai", "Sure"):
+     * English: "Sounds good! I'm right here whenever you need anything."
+     * Hinglish: "Theek hai! Jab bhi zaroorat ho, bas bata dijiyega."
+     * Hindi: "ठीक है! जब भी आवश्यकता हो, अवश्य बताएं।"
+   - PARTING ("Bye", "Goodbye", "Alvida", "See you"):
+     * English: "Goodbye! Have a productive and wonderful day ahead."
+     * Hinglish: "Alvida! Aapka din shubh aur productive rahe."
+     * Hindi: "अलविदा! आपका दिन शुभ रहे।"
+   - IDENTITY / CAPABILITY ("Who are you?", "What can you do?", "Aap kaun ho?"):
+     * English: "I'm your AI HR assistant. I can help you check your attendance, leave balances, company holidays, shift details, and more."
+     * Hinglish: "Main aapka AI HR assistant hoon. Main aapki attendance, leave balance, company holidays, shift timings aur policies check karne mein madad karta hoon."
+     * Hindi: "मैं आपका एआई एचआर सहायक हूँ। मैं आपकी अटेंडेंस, लीव बैलेंस, छुट्टियाँ और शिफ्ट डिटेल्स देखने में मदद कर सकता हूँ।"
+3. STRICT LANGUAGE MATCHING:
+   - You MUST reply strictly in {lang_mode}!
+   - Never answer in English when asked in Hindi or Hinglish.
 """
 
         models_to_try = [self.model]
@@ -482,8 +513,8 @@ Rules:
                 response = self.client.chat.completions.create(
                     model=m,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=300,
+                    temperature=0.65,
+                    max_tokens=250,
                 )
                 text = self._response_text(response)
                 if text:
@@ -493,10 +524,41 @@ Rules:
                 continue
 
         if not text:
+            q = user_query.casefold().strip()
+            if any(w in q for w in ("how are you", "how are you doing", "kaise ho", "kya haal")):
+                if lang_mode == "Hindi":
+                    return "मैं बिल्कुल ठीक हूँ, पूछने के लिए धन्यवाद! आप कैसे हैं?"
+                if lang_mode == "Hinglish":
+                    return "Main bilkul badhiya hoon, poochhne ke liye shukriya! Aap bataiye, sab kaisa chal raha hai?"
+                return "I'm doing great, thank you for asking! How are things with you?"
+            if any(w in q for w in ("thank", "thanks", "shukriya", "dhanyawad")):
+                if lang_mode == "Hindi":
+                    return "आपका बहुत-बहुत स्वागत है! अगर कोई और जानकारी चाहिए तो ज़रूर बताएं।"
+                if lang_mode == "Hinglish":
+                    return "Aapka swagat hai! Agar aur koi sawaal ho toh zaroor bataiye."
+                return "You're very welcome! Let me know if you need anything else."
+            if any(w in q for w in ("ok", "okay", "theek", "thik", "theek hai")):
+                if lang_mode == "Hindi":
+                    return "ठीक है! जब भी आवश्यकता हो, अवश्य बताएं।"
+                if lang_mode == "Hinglish":
+                    return "Theek hai! Jab bhi zaroorat ho, bas bata dijiyega."
+                return "Sounds good! I'm right here whenever you need anything."
+            if any(w in q for w in ("bye", "goodbye", "alvida", "see you")):
+                if lang_mode == "Hindi":
+                    return "अलविदा! आपका दिन शुभ रहे।"
+                if lang_mode == "Hinglish":
+                    return "Alvida! Aapka din shubh aur productive rahe."
+                return "Goodbye! Have a productive and wonderful day ahead."
+            if any(w in q for w in ("who are you", "what can you do", "aap kaun")):
+                if lang_mode == "Hindi":
+                    return "मैं आपका एआई एचआर सहायक हूँ। मैं आपकी अटेंडेंस, लीव बैलेंस और कंपनी नीतियों की जानकारी दे सकता हूँ।"
+                if lang_mode == "Hinglish":
+                    return "Main aapka AI HR assistant hoon. Main aapki attendance, leave balance aur policies check karne mein madad karta hoon."
+                return "I'm your AI HR assistant. I can help you check your attendance, leave balances, shift details, and company policies."
             if lang_mode == "Hindi":
                 return "नमस्ते! मैं आपकी किस प्रकार सहायता कर सकता हूँ?"
             if lang_mode == "Hinglish":
-                return "Namaste! Main aapki kya madad kar sakta hoon?"
+                return "Namaste! Batayein aaj main aapki kya madad karoon?"
             return "Hello! How can I help you today?"
 
         return text
@@ -560,7 +622,9 @@ LANGUAGE MATCHING (CRITICAL):
 - Never mix scripts in the same response.
 
 RESPONSE STYLE & FORMAT:
-- Speak like a friendly, intelligent HR AI assistant.
+- Speak like a friendly, intelligent HR AI assistant speaking through a live avatar.
+- NEVER use robotic template openings ("Certainly!", "Of course!", "Sure!", "Sure, I can help with that!", "As an AI language model..."). Answer directly, warmly, and clearly.
+- Use natural contractions and conversational phrasing so spoken delivery sounds fluent.
 - Answer single-fact questions (designation, shift, branch, check-in time) in complete, natural, polite conversational sentences.
 - For attendance: provide a conversational summary then recent records with check-in/check-out times in IST.
 - For leave balance: state total remaining leaves, then break down each leave type (allocated, used, remaining).

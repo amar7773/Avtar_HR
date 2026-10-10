@@ -161,6 +161,7 @@ class StructuredQueryRouter:
         normalized = normalized.replace("checkin", "check in").replace("checkout", "check out")
         normalized = normalized.replace("lifline", "lifeline").replace("chek", "check").replace("cehck", "check")
         normalized = normalized.replace("shifiting", "shifting")
+        normalized = re.sub(r"[?!.,;]+", "", normalized).strip()
 
         ctx = self._context.setdefault(str(employee_id), {})
         latest_year = self._latest_year(employee_id)
@@ -240,6 +241,38 @@ class StructuredQueryRouter:
             ctx["last_month"] = filters["month"]
             ctx["last_year"] = filters.get("year", latest_year)
 
+        # Resolve prior domain from context or conversation history for follow-up continuity
+        prior_domain = ctx.get("kind")
+        if not prior_domain and conversation_history:
+            for msg in reversed(conversation_history):
+                content = str(msg.get("content", "")).casefold()
+                if any(w in content for w in ("attendance", "check in", "check out", "present", "absent", "worked hours", "half day")):
+                    prior_domain = "attendance"
+                    break
+                elif any(w in content for w in ("leave balance", "leaves left", "leave request", "leave type", "chutti")):
+                    prior_domain = "leave"
+                    break
+                elif any(w in content for w in ("salary", "tankhah", "payslip", "allowance", "deduction")):
+                    prior_domain = "salary"
+                    break
+                elif any(w in content for w in ("holiday", "holidays", "त्योहार")):
+                    prior_domain = "holiday"
+                    break
+                elif any(w in content for w in ("shift", "shift timing")):
+                    prior_domain = "shift"
+                    break
+                elif any(w in content for w in ("branch", "office location")):
+                    prior_domain = "branch"
+                    break
+                elif any(w in content for w in ("designation", "role")):
+                    prior_domain = "designation"
+                    break
+                elif any(w in content for w in ("profile", "joining date")):
+                    prior_domain = "profile"
+                    break
+            if prior_domain:
+                ctx["kind"] = prior_domain
+
         # =========================================================
         # 1. MODULE: HOLIDAYS
         # =========================================================
@@ -247,7 +280,16 @@ class StructuredQueryRouter:
             "holiday", "holidays", "upcoming holidays", "company holidays",
             "holiday list", "list of holidays", "त्योहार", "छुट्टी सूची"
         )
-        if any(term in normalized for term in holiday_terms) and not any(
+        holiday_follow_up = (
+            prior_domain == "holiday"
+            and not any(w in normalized for w in ("leave", "salary", "shift", "branch", "chutti", "attendance"))
+            and (
+                bool(filters.get("month"))
+                or any(w in normalized for w in ("upcoming", "next", "agla", "agli", "list"))
+                or any(m in normalized for m in ("and", "aur", "what about", "how about"))
+            )
+        )
+        if (any(term in normalized for term in holiday_terms) or holiday_follow_up) and not any(
             w in normalized for w in ("leave balance", "remaining leave", "applied leave", "apply leave", "leaves left")
         ):
             holidays = holidays_tool(year=filters.get("year"), month=filters.get("month"))
@@ -257,10 +299,14 @@ class StructuredQueryRouter:
         # =========================================================
         # 2. MODULE: SHIFT
         # =========================================================
+        # =========================================================
+        # 2. MODULE: SHIFT
+        # =========================================================
         shift_terms = (
             "my shift", "shift timing", "shift time", "assigned shift",
             "duty timing", "duty time", "what is my shift", "show my shift",
-            "shift details", "shifting"
+            "shift details", "shifting", "meri shift", "mera shift", "shift kya hai",
+            "shift"
         )
         if any(term in normalized for term in shift_terms) and not any(
             w in normalized for w in ("attendance", "check in on", "check out on")
@@ -277,7 +323,7 @@ class StructuredQueryRouter:
         branch_terms = (
             "my branch", "office branch", "registered branch", "branch location",
             "office location", "work branch", "kaunsi branch", "what is my branch",
-            "where is my branch"
+            "where is my branch", "mera branch", "meri branch", "branch"
         )
         if any(term in normalized for term in branch_terms):
             branch_res = branch_tool(employee_id)
@@ -292,7 +338,8 @@ class StructuredQueryRouter:
         designation_terms = (
             "my designation", "current designation", "my role", "job role",
             "post", "my post", "पद", "kaunsi post", "kya designation",
-            "what is my designation", "what is my role"
+            "what is my designation", "what is my role",
+            "mera designation", "meri designation", "designation"
         )
         if any(term in normalized for term in designation_terms):
             des_res = designation_tool(employee_id)
@@ -304,17 +351,32 @@ class StructuredQueryRouter:
         # =========================================================
         # 5. MODULE: LEAVE
         # =========================================================
+        # Leave process / application questions: let RAG handle company policy
+        is_leave_process_query = (
+            any(term in normalized for term in (
+                "apply", "kaise apply", "kese apply", "how do i apply", "how to apply",
+                "procedure", "process", "apply karu", "apply kare", "apply kru"
+            ))
+            and any(term in normalized for term in ("leave", "leaves", "chutti", "chhutti"))
+        )
+        if is_leave_process_query:
+            return None
+
         leave_balance_terms = (
             "leave balance", "remaining leave", "remaining leaves", "leaves left",
             "leave left", "how many leaves", "leaves do i have", "kitni leave",
             "kitni leaves", "leave bachi", "leaves bachi", "meri leave", "mera leave",
             "chutti bachi", "chhutti bachi", "kitni chutti", "kitni chhutti",
-            "balance leave", "balance leaves", "total leaves left", "leave count"
+            "balance leave", "balance leaves", "total leaves left", "leave count",
+            "leave kitni"
         )
         leave_types_terms = (
             "leave type", "leave types", "leave policy", "leave rules",
             "which leaves", "what leaves", "types of leave", "leaves available",
-            "available leaves", "available leave", "छुट्टी के प्रकार", "छुट्टी नीति"
+            "available leaves", "available leave", "छुट्टी के प्रकार", "छुट्टी नीति",
+            "kon kon si leave", "kon kon si leaves", "kaun kaun si leave", "kaun kaun si leaves",
+            "kon kon si chhutti", "kaun kaun si chhutti", "chhutti milti", "chutti milti",
+            "chhutti milti hai", "chutti milti hai", "kitni leave milti", "kitni chhutti milti",
         )
         leave_request_terms = (
             "leave request", "leave requests", "leave history", "applied leave",
@@ -322,17 +384,35 @@ class StructuredQueryRouter:
             "leave status", "leave application"
         )
 
+        leave_follow_up = (
+            prior_domain == "leave"
+            and not any(w in normalized for w in ("attendance", "check in", "check out", "holiday", "salary", "shift", "branch"))
+            and (
+                any(w in normalized for w in ("sick", "casual", "earned", "paid", "unpaid", "request", "applied", "status", "bachi", "left", "remaining", "balance"))
+                or any(m in normalized for m in ("and", "aur", "what about", "how about"))
+            )
+        )
+
         is_leave_query = (
             any(w in normalized for w in leave_balance_terms)
             or any(w in normalized for w in leave_types_terms)
             or any(w in normalized for w in leave_request_terms)
+            or leave_follow_up
             or ("leave" in normalized and not any(w in normalized for w in ("attendance", "check in", "check out", "shift", "holiday")))
+            or ("leaves" in normalized and not any(w in normalized for w in ("attendance", "check in", "check out", "shift", "holiday")))
+            or ("chhutti" in normalized and not any(w in normalized for w in ("attendance", "check in", "check out", "shift", "holiday")))
+            or ("chutti" in normalized and not any(w in normalized for w in ("attendance", "check in", "check out", "shift", "holiday")))
         )
 
         if is_leave_query:
             ctx["kind"] = "leave"
             if any(w in normalized for w in leave_types_terms):
-                return self._result("get_leave_types", leave_types_tool())
+                lt_res = leave_types_tool()
+                types = lt_res.get("leave_types", [])
+                return self._result("get_leave_types", {
+                    "leave_types": types,
+                    "records": types,
+                })
 
             if any(w in normalized for w in leave_request_terms) and not any(w in normalized for w in leave_balance_terms):
                 status = next((s for s in ("approved", "rejected", "pending", "cancelled") if s in normalized), None)
@@ -364,7 +444,16 @@ class StructuredQueryRouter:
         # 7. MODULE: SALARY
         # =========================================================
         salary_terms = ("salary", "वेतन", "pay", "payslip", "tankhah", "salary slip")
-        if any(term in normalized for term in salary_terms):
+        salary_follow_up = (
+            prior_domain == "salary"
+            and not any(w in normalized for w in ("attendance", "leave", "holiday", "shift", "branch"))
+            and (
+                bool(filters.get("month"))
+                or any(w in normalized for w in ("slip", "basic", "allowance", "deduction", "net"))
+                or any(m in normalized for m in ("and", "aur", "what about", "how about"))
+            )
+        )
+        if any(term in normalized for term in salary_terms) or salary_follow_up:
             frame = self.data.get_salary(employee_id, month=filters.get("month"))
             if frame.empty:
                 return self._missing("salary", filters)
@@ -382,25 +471,91 @@ class StructuredQueryRouter:
             return self._result("get_salary", {"records": records, "filters": filters})
 
         # =========================================================
-        # 8. MODULE: ATTENDANCE
+        # 8. MODULE: PROJECTS
         # =========================================================
+        project_terms = (
+            "project", "projects", "mera project", "mere projects",
+            "show my projects", "my projects", "assigned projects"
+        )
+        if any(term in normalized for term in project_terms):
+            frame = self.data.get_projects(employee_id)
+            if frame.empty:
+                return self._missing("projects", "No projects data found for this employee.")
+            ctx["kind"] = "projects"
+            ctx["last_intent"] = "projects"
+            fields = self._fields(query, "projects")
+            records = []
+            for _, row in frame.iterrows():
+                record = {}
+                for field in fields:
+                    source = next((col for col in self.DATA_FIELDS["projects"][field] if col in row), None)
+                    if source:
+                        val = row[source]
+                        record[field] = None if val != val else val
+                records.append(record)
+            return self._result("get_projects", {"records": records})
+
+        # =========================================================
+        # 9. MODULE: ATTENDANCE & LIFELINES
+        # =========================================================
+        # Check for lifeline correction if previous intent was lifeline
+        is_lifeline_correction = (
+            ctx.get("last_intent") == "lifeline"
+            and any(w in normalized for w in ("nahi", "not", "nhi", "no", "pooch raha", "pooch rha", "was asking"))
+            and any(w in normalized for w in ("check in", "check out"))
+        )
+        is_lifeline_query = (
+            "lifeline" in normalized
+            or is_lifeline_correction
+        )
+        if is_lifeline_query:
+            balance_result = lifeline_balance_tool(employee_id, month=filters.get("month"), year=filters.get("year"))
+            if not balance_result.get("success"):
+                return self._missing("lifeline balance", balance_result.get("message"))
+            ctx["last_intent"] = "lifeline"
+            ctx["kind"] = "attendance"
+
+            has_checkin = "check in" in normalized
+            has_checkout = "check out" in normalized
+
+            if has_checkin and not has_checkout:
+                data = {
+                    "late_check_in_remaining": balance_result.get("late_check_in_remaining"),
+                    "period": balance_result.get("period")
+                }
+            elif has_checkout and not has_checkin:
+                data = {
+                    "early_checkout_remaining": balance_result.get("early_checkout_remaining"),
+                    "period": balance_result.get("period")
+                }
+            else:
+                data = {
+                    "late_check_in_remaining": balance_result.get("late_check_in_remaining"),
+                    "early_checkout_remaining": balance_result.get("early_checkout_remaining"),
+                    "period": balance_result.get("period")
+                }
+            return self._result("get_attendance_summary", data)
+
         attendance_terms = (
             "attendance", "check in", "check-in", "check out", "check-out",
-            "present", "absent", "half day", "hours", "worked", "lifeline",
+            "present", "absent", "half day", "hours", "worked",
             "उपस्थिति", "हाजिरी", "worked minutes", "working time", "working hours",
             "late", "last attendance"
         )
-        is_attendance_query = any(term in normalized for term in attendance_terms) or bool(filters.get("date"))
+        is_attendance_follow_up = (
+            prior_domain == "attendance"
+            and not any(w in normalized for w in ("leave", "holiday", "salary", "shift", "branch", "designation", "profile", "chutti"))
+            and (
+                bool(filters.get("date"))
+                or bool(filters.get("month"))
+                or any(m in normalized for m in ("and", "aur", "what about", "how about", "then", "us din", "that day", "kal", "yesterday", "today", "parson", "last month", "pichle"))
+            )
+        )
+        is_attendance_query = any(term in normalized for term in attendance_terms) or bool(filters.get("date")) or is_attendance_follow_up
 
         if is_attendance_query:
             ctx["kind"] = "attendance"
-
-            # 8a. Lifeline balance
-            if "lifeline" in normalized and any(term in normalized for term in ("remaining", "left", "bachi", "balance")):
-                balance_result = lifeline_balance_tool(employee_id, month=filters.get("month"), year=filters.get("year"))
-                if not balance_result.get("success"):
-                    return self._missing("lifeline balance", balance_result.get("message"))
-                return self._result("get_attendance_summary", balance_result)
+            ctx["last_intent"] = "attendance"
 
             # 8b. EXACT DATE-SPECIFIC ATTENDANCE
             if filters.get("date"):
@@ -539,7 +694,8 @@ class StructuredQueryRouter:
                     "remaining_worked_minutes": summary.get("remaining_worked_minutes", 0),
                 },
                 "recent_records": records[:5],
-                "records": records[:5],
+                "records": records,
+                "filters": filters,
             })
 
         return None
@@ -666,10 +822,34 @@ class StructuredQueryRouter:
                 lines.append(f"- **Employment Status:** {status}")
             return "\n".join(lines)
 
-        # 9. Attendance Queries
+        # 9. Projects
+        if tool_used == "get_projects":
+            records = data.get("records", [])
+            if not records:
+                return "You have no projects assigned on record."
+            lines = ["Here are your assigned projects:\n"]
+            for p in records:
+                name = p.get("project_name", "Project")
+                tech = f" ({p.get('technology')})" if p.get("technology") else ""
+                status = p.get("status", "In Progress")
+                lines.append(f"- **{name}**{tech} - Status: **{status}**")
+            return "\n".join(lines)
+
+        # 10. Attendance Queries
         if tool_used in ("get_attendance", "get_attendance_summary"):
             record = data.get("record")
             date = data.get("date")
+
+            # Lifeline balance
+            if "late_check_in_remaining" in data or "early_checkout_remaining" in data:
+                period = data.get("period", "this month")
+                parts = []
+                if "late_check_in_remaining" in data:
+                    parts.append(f"**{data['late_check_in_remaining']} late check-in lifeline(s)**")
+                if "early_checkout_remaining" in data:
+                    parts.append(f"**{data['early_checkout_remaining']} early checkout lifeline(s)**")
+                joined = " and ".join(parts)
+                return f"For **{period}**, you have {joined} remaining."
 
             # Check-in time query
             if q_intent == "check_in":
@@ -714,17 +894,19 @@ class StructuredQueryRouter:
             if q_intent == "date_attendance":
                 if record:
                     status = record.get("status", "Present")
-                    cin = record.get("check_in") or "Not recorded"
-                    cout = record.get("check_out") or "Not recorded"
+                    cin = record.get("check_in")
+                    cout = record.get("check_out")
                     h = record.get("worked_hours", 0)
                     m = record.get("worked_minutes", 0)
-                    return (
-                        f"Here is your attendance details for **{date}**:\n"
-                        f"- **Status:** {status}\n"
-                        f"- **Check-in:** {cin}\n"
-                        f"- **Check-out:** {cout}\n"
-                        f"- **Working Hours:** {h} hour(s) and {m} minute(s)"
-                    )
+                    time_details = []
+                    if cin:
+                        time_details.append(f"check-in at **{cin}**")
+                    if cout:
+                        time_details.append(f"check-out at **{cout}**")
+                    if h or m:
+                        time_details.append(f"worked **{h} hour(s) and {m} minute(s)**")
+                    detail_str = f" with {', '.join(time_details)}" if time_details else ""
+                    return f"On **{date}**, you were recorded as **{status}**{detail_str}."
                 return f"No attendance record is available for {date}."
 
             # Total attendance count
@@ -737,12 +919,9 @@ class StructuredQueryRouter:
                 h = data.get("total_worked_hours", 0)
                 m = data.get("remaining_worked_minutes", 0)
                 return (
-                    f"Here is your total attendance summary for **{period}**:\n"
-                    f"- **Total Attendance Logged:** {total} day(s)\n"
-                    f"- **Present Days:** {pres} day(s)\n"
-                    f"- **Half Days:** {half} day(s)\n"
-                    f"- **Absent Days:** {absent} day(s)\n"
-                    f"- **Total Working Time:** {h} hour(s) and {m} minute(s)"
+                    f"For **{period}**, you have **{total} attendance record(s)** logged: "
+                    f"**{pres} present day(s)**, **{half} half-day(s)**, and **{absent} absent day(s)**, "
+                    f"totaling **{h} hour(s) and {m} minute(s)** of working time."
                 )
 
             # Total hours query

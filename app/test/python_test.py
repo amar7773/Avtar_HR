@@ -1,27 +1,26 @@
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from app.Services.Data_services import DataService
 
 
-data_service = DataService()
+def test_data_service():
+    data_service = DataService()
+    employee_id = 101
 
-employee_id = 101
+    attendance = data_service.get_attendance(employee_id)
+    assert attendance is not None
 
+    experience = data_service.get_experience(employee_id)
+    assert experience is not None
 
-print("===== ATTENDANCE =====")
-
-attendance = data_service.get_attendance(employee_id)
-
-print(attendance)
-
-
-print("\n===== EXPERIENCE =====")
-
-experience = data_service.get_experience(employee_id)
-
-print(experience)
+    salary = data_service.get_salary(employee_id)
+    assert salary is not None
 
 
-print("\n===== SALARY =====")
-
-salary = data_service.get_salary(employee_id)
-
-print(salary)
+if __name__ == "__main__":
+    test_data_service()
