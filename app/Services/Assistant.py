@@ -94,9 +94,9 @@ class AssistantService:
                 "rag_context": None,
             }
 
-        # 3. Intent prediction and RAG context retrieval
+        # 3. Intent prediction and selective RAG context retrieval
         prediction = self.prediction_service.predict(user_query)
-        context = self.rag_service.get_context(user_query, top_k=3)
+        context = self.rag_service.get_context(user_query, top_k=3) if self._needs_rag(user_query) else None
 
         result = self.llm_service.generate_response(
             query=user_query,
@@ -163,6 +163,23 @@ class AssistantService:
             return True
 
         return False
+
+    @staticmethod
+    def _needs_rag(user_query):
+        q = str(user_query).casefold()
+        policy_keywords = {
+            "policy", "policies", "handbook", "rule", "rules", "guideline", "guidelines",
+            "posh", "harassment", "maternity", "paternity", "bereavement",
+            "probation", "notice period", "resignation", "termination",
+            "insurance", "mediclaim", "benefit", "benefits", "reimbursement",
+            "claim", "travel policy", "code of conduct", "dress code", "wfh",
+            "work from home", "leave policy", "attendance policy",
+            "overtime policy", "transfer", "gratuity", "provident fund", "pf",
+            "esi", "appraisal", "bonus", "increment", "promotion", "nda",
+            "confidentiality", "security policy", "chutti niyam", "chhutti niyam",
+            "niyam", "niyamo", "disha nirdesh", "guidance",
+        }
+        return any(kw in q for kw in policy_keywords)
 
     def process_speech_to_speech(
         self,

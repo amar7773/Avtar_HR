@@ -246,6 +246,7 @@ function App() {
   );
   const [avatarState, setAvatarState] = useState("idle");
   const [hasStreamVideo, setHasStreamVideo] = useState(false);
+  const [isAssistantSpeaking, setIsAssistantSpeaking] = useState(false);
   const speechFallbackTimeoutRef = useRef(null);
   const [latestUserText, setLatestUserText] = useState("");
   const [latestAiResponse, setLatestAiResponse] = useState("");
@@ -1502,6 +1503,7 @@ function App() {
     currentAudioRequestIdRef.current += 1;
     shouldDiscardRecordingRef.current = true;
     isSubmittingVoiceRef.current = false;
+    setIsAssistantSpeaking(false);
 
     // Interrupt active LiveAvatar WebRTC speech only on the main avatar page
     if (activePageRef.current === "avtar") {
@@ -2101,21 +2103,28 @@ function App() {
       activeAudioRef.current = audio;
       ttsAudioRef.current = audio;
 
+      audio.onplay = () => {
+        setIsAssistantSpeaking(true);
+      };
+
       const cleanupTtsAudio = () => {
         audio.onended = null;
         audio.onerror = null;
         audio.onpause = null;
+        audio.onplay = null;
         if (activeAudioRef.current === audio) {
           activeAudioRef.current = null;
         }
         if (ttsAudioRef.current === audio) {
           ttsAudioRef.current = null;
         }
+        setIsAssistantSpeaking(false);
         setVoiceLoading(false);
       };
 
       audio.onended = cleanupTtsAudio;
       audio.onerror = cleanupTtsAudio;
+      audio.onpause = cleanupTtsAudio;
 
       await audio.play();
     } catch (error) {
@@ -2708,16 +2717,24 @@ function App() {
           activeAudioRef.current = audio;
           audio.playbackRate = 1.0;
 
+          audio.onplay = () => {
+            setIsAssistantSpeaking(true);
+          };
+
           const cleanupVoiceAudio = () => {
             audio.onended = null;
             audio.onerror = null;
+            audio.onpause = null;
+            audio.onplay = null;
             if (activeAudioRef.current === audio) {
               activeAudioRef.current = null;
             }
+            setIsAssistantSpeaking(false);
           };
 
           audio.onended = cleanupVoiceAudio;
           audio.onerror = cleanupVoiceAudio;
+          audio.onpause = cleanupVoiceAudio;
 
           audio.play().catch((e) => {
             console.warn("Audio autoplay blocked:", e);
@@ -3125,6 +3142,8 @@ function App() {
             userAudioUrl={userAudioUrl}
             voiceCompact={voiceCompact}
             quickActions={QUICK_ACTIONS}
+            isSpeaking={isAssistantSpeaking}
+            onStopSpeaking={() => stopAllAudio({ resetUI: false })}
           />
         )}
       </main>
@@ -3297,6 +3316,7 @@ function AvtarPage({
   const [pageInput, setPageInput] = useState("");
   const [isDictating, setIsDictating] = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoAspectRatio, setVideoAspectRatio] = useState(16 / 9);
   const dictationRecorderRef = useRef(null);
 
   const handleManualDictation = async () => {
@@ -3492,7 +3512,8 @@ function AvtarPage({
 
           {/* LEFT: Live Avatar Stage */}
           <div
-            className={`avatar-stage ${status.className} has-video`}
+            className={`avatar-stage ${status.className} ${isLiveAvatarConnected && isVideoPlaying && !isSessionExpired ? "has-active-video" : "has-preview-image"}`}
+            style={{ "--avatar-aspect-ratio": `${videoAspectRatio}` }}
             onClick={async () => {
               await unlockBrowserAudio();
               if (liveAvatarController) {
@@ -3513,9 +3534,12 @@ function AvtarPage({
           >
             <div className="avatar-ambient-halo" />
 
-            {/* Backing crisp avatar image layer so screen is never blank */}
+            {/* Backing crisp avatar image layer: only shown when video is inactive, strictly hidden during live video call */}
             <img
-              className="avatar-image"
+              className={`avatar-image ${isLiveAvatarConnected && isVideoPlaying && !isSessionExpired ? "hidden" : "visible"}`}
+              style={{
+                display: isLiveAvatarConnected && isVideoPlaying && !isSessionExpired ? "none" : "block",
+              }}
               src={liveAvatarPreviewUrl || avatarImageUrl || `${API_URL}/avatar-files/avtar_img.jpg`}
               alt="Avtar"
               onError={(e) => {
@@ -3537,9 +3561,21 @@ function AvtarPage({
               loop={false}
               onEnded={onVideoEnded}
               onPlaying={() => setIsVideoPlaying(true)}
-              onLoadedMetadata={() => setIsVideoPlaying(true)}
+              onLoadedMetadata={(e) => {
+                setIsVideoPlaying(true);
+                const vw = e?.currentTarget?.videoWidth;
+                const vh = e?.currentTarget?.videoHeight;
+                if (vw && vh && vh > 0) {
+                  setVideoAspectRatio(vw / vh);
+                }
+              }}
               onCanPlay={(e) => {
                 setIsVideoPlaying(true);
+                const vw = e?.currentTarget?.videoWidth;
+                const vh = e?.currentTarget?.videoHeight;
+                if (vw && vh && vh > 0) {
+                  setVideoAspectRatio(vw / vh);
+                }
                 if (e.currentTarget.paused) {
                   e.currentTarget.play().catch(() => {});
                 }
@@ -4449,6 +4485,8 @@ function AssistantView({
   userAudioUrl,
   voiceCompact,
   quickActions,
+  isSpeaking = false,
+  onStopSpeaking,
 }) {
   const empty = messages.length === 0;
 
@@ -4674,21 +4712,46 @@ function AssistantView({
       )}
 
       <div className="composer-shell">
-        <div className="composer-mode">
+        <div className={`composer-mode ${recording ? "listening" : (loading || voiceLoading) ? "processing" : isSpeaking ? "speaking" : "ready"}`}>
           <span
             className={`mode-dot ${
-              recording ||
-              voiceLoading
-                ? "active"
-                : ""
+              recording
+                ? "listening-dot"
+                : (loading || voiceLoading)
+                  ? "processing-dot"
+                  : isSpeaking
+                    ? "speaking-dot"
+                    : "ready-dot"
             }`}
           />
 
-          {recording
-            ? "Listening..."
-            : voiceLoading
-              ? "Preparing voice..."
-              : "Ready"}
+          {recording ? (
+            <span className="composer-mode-text">Listening...</span>
+          ) : (loading || voiceLoading) ? (
+            <span className="composer-mode-text">Processing...</span>
+          ) : isSpeaking ? (
+            <span className="composer-mode-text speaking-text">
+              Speaking...
+              <span className="mini-equalizer">
+                <span className="eq-bar b1" />
+                <span className="eq-bar b2" />
+                <span className="eq-bar b3" />
+              </span>
+            </span>
+          ) : (
+            <span className="composer-mode-text">Ready</span>
+          )}
+
+          {isSpeaking && onStopSpeaking && (
+            <button
+              type="button"
+              className="stop-speaking-pill-btn"
+              onClick={onStopSpeaking}
+              title="Stop speaking"
+            >
+              ⏹ Stop
+            </button>
+          )}
         </div>
 
         <div className="composer">
@@ -4696,20 +4759,21 @@ function AssistantView({
             className={`voice-button ${
               recording
                 ? "recording"
-                : ""
+                : isSpeaking
+                  ? "speaking"
+                  : ""
             }`}
             onClick={
               recording
                 ? stopRecording
-                : () => startVoiceAI("voice_mode")
+                : isSpeaking
+                  ? onStopSpeaking
+                  : () => startVoiceAI("voice_mode")
             }
-            disabled={
-              loading ||
-              voiceLoading
-            }
-            title="Voice assistant"
+            disabled={loading || voiceLoading}
+            title={recording ? "Stop listening" : isSpeaking ? "Stop speaking" : "Voice assistant"}
           >
-            {recording ? "■" : "●"}
+            {recording ? "■" : isSpeaking ? "❚❚" : "●"}
           </button>
 
           <textarea

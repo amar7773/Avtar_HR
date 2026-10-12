@@ -437,7 +437,7 @@ RULES FOR EXACT, QUERY-SPECIFIC AND NATURAL RESPONSES:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.45,
-                max_tokens=800,
+                max_tokens=350,
             )
 
             text = self._response_text(response)
@@ -458,6 +458,77 @@ RULES FOR EXACT, QUERY-SPECIFIC AND NATURAL RESPONSES:
         if not lang_mode:
             lang_mode = detect_language_mode(user_query)
 
+        q_clean = re.sub(r"[.!?,;:\"'/\\]+", "", str(user_query).casefold()).strip()
+        q_clean = re.sub(r"\s+", " ", q_clean)
+
+        # 0. Near-instant deterministic responses for canonical small-talk (<1ms)
+        greeting_words = {
+            "hi", "hello", "hey", "hola", "namaste", "namaskar", "नमस्ते", "नमस्कार",
+            "pranam", "प्रणाम", "good morning", "good evening", "good afternoon",
+            "shubh prabhat", "शुभ प्रभात",
+        }
+        if q_clean in greeting_words or q_clean.startswith(("good morning", "good evening", "good afternoon")):
+            if lang_mode == "Hindi":
+                return "नमस्ते! आप कैसे हैं? बताइए आज मैं आपकी क्या सहायता कर सकता हूँ?"
+            if lang_mode == "Hinglish":
+                return "Namaste! Kaise hain aap? Batayein aaj main aapki kya madad karoon?"
+            return "Hello! Great to see you. How can I help you today?"
+
+        wellbeing_phrases = {
+            "how are you", "how are you doing", "how do you do", "kaise ho", "kya haal hai",
+            "kaisa chal raha hai", "आप कैसे हैं", "kaise hain", "kaisa hai",
+        }
+        if q_clean in wellbeing_phrases:
+            if lang_mode == "Hindi":
+                return "मैं बिल्कुल ठीक हूँ, पूछने के लिए धन्यवाद! आप कैसे हैं?"
+            if lang_mode == "Hinglish":
+                return "Main bilkul badhiya hoon, poochhne ke liye shukriya! Aap bataiye, sab kaisa chal raha hai?"
+            return "I'm doing great, thank you for asking! How are things with you?"
+
+        gratitude_phrases = {
+            "thank you", "thanks", "thanks a lot", "thank you so much", "dhanyawad",
+            "shukriya", "धन्यवाद", "शुक्रिया",
+        }
+        if q_clean in gratitude_phrases:
+            if lang_mode == "Hindi":
+                return "आपका बहुत-बहुत स्वागत है! अगर कोई और जानकारी चाहिए तो ज़रूर बताएं।"
+            if lang_mode == "Hinglish":
+                return "Aapka swagat hai! Agar aur koi sawaal ho toh zaroor bataiye."
+            return "You're very welcome! Let me know if you need anything else."
+
+        ack_phrases = {
+            "ok", "okay", "theek hai", "thik hai", "theek", "thik", "ठीक", "ठीक है",
+            "alright", "got it", "theek h", "thik h", "yes", "yeah", "haan", "ha",
+        }
+        if q_clean in ack_phrases:
+            if lang_mode == "Hindi":
+                return "ठीक है! जब भी आवश्यकता हो, अवश्य बताएं।"
+            if lang_mode == "Hinglish":
+                return "Theek hai! Jab bhi zaroorat ho, bas bata dijiyega."
+            return "Sounds good! I'm right here whenever you need anything."
+
+        farewell_phrases = {
+            "bye", "goodbye", "alvida", "अलविदा", "see you", "see you later",
+            "good night", "shubh ratri", "शुभ रात्रि",
+        }
+        if q_clean in farewell_phrases:
+            if lang_mode == "Hindi":
+                return "अलविदा! आपका दिन शुभ रहे।"
+            if lang_mode == "Hinglish":
+                return "Alvida! Aapka din shubh aur productive rahe."
+            return "Goodbye! Have a productive and wonderful day ahead."
+
+        identity_phrases = {
+            "who are you", "what is your name", "what's your name", "aap kaun ho",
+            "aap kaun hain", "what can you do", "help me", "can you help me",
+        }
+        if q_clean in identity_phrases:
+            if lang_mode == "Hindi":
+                return "मैं आपका एआई एचआर सहायक हूँ। मैं आपकी अटेंडेंस, लीव बैलेंस, छुट्टियाँ और शिफ्ट डिटेल्स देखने में मदद कर सकता हूँ।"
+            if lang_mode == "Hinglish":
+                return "Main aapka AI HR assistant hoon. Main aapki attendance, leave balance, company holidays, shift timings aur policies check karne mein madad karta hoon."
+            return "I'm your AI HR assistant. I can help you check your attendance, leave balances, company holidays, shift details, and more."
+
         prompt = f"""You are the conversational speaking layer of an intelligent AI HR Employee Assistant talking with an employee through a live avatar.
 
 Employee ID: {employee_id}
@@ -473,30 +544,12 @@ RULES FOR NATURAL HUMAN-LIKE CONVERSATION:
    - NEVER start with robotic template openings ("Certainly!", "Of course!", "Sure!", "Sure, I can help with that!", "As an AI language model...").
    - Keep answers concise (1 to 2 short, natural sentences). Never generate long paragraphs for small talk.
 2. Match the specific conversational intent:
-   - GREETING ("Hi", "Hello", "Good morning", "Hey"):
-     * English: "Hello! Great to see you. How can I help you today?"
-     * Hinglish: "Namaste! Kaise hain aap? Batayein aaj main aapki kya madad karoon?"
-     * Hindi: "नमस्ते! आप कैसे हैं? बताइए आज मैं आपकी क्या सहायता कर सकता हूँ?"
-   - WELL-BEING / SOCIAL ("How are you?", "How are you doing?", "Kaise ho?", "Kya haal hai?"):
-     * English: "I'm doing great, thank you for asking! How are things with you?"
-     * Hinglish: "Main bilkul badhiya hoon, poochhne ke liye shukriya! Aap bataiye, sab kaisa chal raha hai?"
-     * Hindi: "मैं बिल्कुल ठीक हूँ, पूछने के लिए धन्यवाद! आप कैसे हैं?"
-   - GRATITUDE ("Thank you", "Thanks", "Shukriya", "Dhanyawad"):
-     * English: "You're very welcome! Let me know if you need anything else."
-     * Hinglish: "Aapka swagat hai! Agar aur koi sawaal ho toh zaroor bataiye."
-     * Hindi: "आपका बहुत-बहुत स्वागत है! अगर कोई और जानकारी चाहिए तो ज़रूर बताएं।"
-   - ACKNOWLEDGEMENT / OKAY ("Okay", "Alright", "Theek hai", "Sure"):
-     * English: "Sounds good! I'm right here whenever you need anything."
-     * Hinglish: "Theek hai! Jab bhi zaroorat ho, bas bata dijiyega."
-     * Hindi: "ठीक है! जब भी आवश्यकता हो, अवश्य बताएं।"
-   - PARTING ("Bye", "Goodbye", "Alvida", "See you"):
-     * English: "Goodbye! Have a productive and wonderful day ahead."
-     * Hinglish: "Alvida! Aapka din shubh aur productive rahe."
-     * Hindi: "अलविदा! आपका दिन शुभ रहे।"
-   - IDENTITY / CAPABILITY ("Who are you?", "What can you do?", "Aap kaun ho?"):
-     * English: "I'm your AI HR assistant. I can help you check your attendance, leave balances, company holidays, shift details, and more."
-     * Hinglish: "Main aapka AI HR assistant hoon. Main aapki attendance, leave balance, company holidays, shift timings aur policies check karne mein madad karta hoon."
-     * Hindi: "मैं आपका एआई एचआर सहायक हूँ। मैं आपकी अटेंडेंस, लीव बैलेंस, छुट्टियाँ और शिफ्ट डिटेल्स देखने में मदद कर सकता हूँ।"
+   - GREETING: Welcome the user and ask how to help.
+   - WELL-BEING: State doing well and ask about them.
+   - GRATITUDE: Welcome them and offer further assistance.
+   - ACKNOWLEDGEMENT: Acknowledge politely and stay available.
+   - PARTING: Wish them a great day ahead.
+   - IDENTITY: State you are the AI HR assistant for attendance, leaves, holidays, and policies.
 3. STRICT LANGUAGE MATCHING:
    - You MUST reply strictly in {lang_mode}!
    - Never answer in English when asked in Hindi or Hinglish.
@@ -513,8 +566,8 @@ RULES FOR NATURAL HUMAN-LIKE CONVERSATION:
                 response = self.client.chat.completions.create(
                     model=m,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.65,
-                    max_tokens=250,
+                    temperature=0.6,
+                    max_tokens=150,
                 )
                 text = self._response_text(response)
                 if text:

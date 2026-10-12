@@ -215,29 +215,38 @@ class TTSService:
                     self.last_pcm_base64 = base64.b64encode(pcm_bytes).decode("ascii")
 
                     # Fast-encode PCM to MP3 using ffmpeg (-threads 4 for ~40ms speed on Windows)
-                    if ffmpeg:
-                        subprocess.run(
-                            [
-                                ffmpeg, "-y", "-threads", "4",
-                                "-f", "s16le", "-ar", "24000", "-ac", "1",
-                                "-i", str(pcm_path),
-                                "-c:a", "libmp3lame", "-b:a", "128k",
-                                str(temporary_path),
-                            ],
-                            capture_output=True, check=False, timeout=10,
+                    if not ffmpeg:
+                        raise RuntimeError(
+                            "ffmpeg is required to encode PCM audio to MP3 but was not found on PATH."
                         )
 
-                    if temporary_path.is_file() and temporary_path.stat().st_size > 0:
-                        self.validate_mp3(temporary_path)
-                        audio_hash = hashlib.sha256(temporary_path.read_bytes()).hexdigest()
-                        os.replace(temporary_path, output_path)
-                        self._generated_outputs[output_path.resolve()] = (
-                            hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                            audio_hash,
+                    ffmpeg_result = subprocess.run(
+                        [
+                            ffmpeg, "-y", "-threads", "4",
+                            "-f", "s16le", "-ar", "24000", "-ac", "1",
+                            "-i", str(pcm_path),
+                            "-c:a", "libmp3lame", "-b:a", "128k",
+                            "-f", "mp3",
+                            str(temporary_path),
+                        ],
+                        capture_output=True, check=False, timeout=10,
+                    )
+
+                    if ffmpeg_result.returncode != 0 or not (
+                        temporary_path.is_file() and temporary_path.stat().st_size > 0
+                    ):
+                        stderr_text = ffmpeg_result.stderr.decode("utf-8", errors="replace").strip()
+                        raise RuntimeError(
+                            f"ffmpeg PCM-to-MP3 encoding failed (exit {ffmpeg_result.returncode}): {stderr_text}"
                         )
-                    else:
-                        temporary_path.write_bytes(pcm_bytes)
-                        os.replace(temporary_path, output_path)
+
+                    self.validate_mp3(temporary_path)
+                    audio_hash = hashlib.sha256(temporary_path.read_bytes()).hexdigest()
+                    os.replace(temporary_path, output_path)
+                    self._generated_outputs[output_path.resolve()] = (
+                        hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        audio_hash,
+                    )
 
                 return str(output_path)
             except Exception as error:

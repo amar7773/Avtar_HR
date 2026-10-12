@@ -787,19 +787,22 @@ textarea:focus-visible {
 .avtar-page {
   display: flex;
   justify-content: center;
-  align-items: flex-start;
-  padding: clamp(14px, 2.5vh, 28px) clamp(14px, 2.5vw, 32px);
+  align-items: stretch;
+  padding: clamp(10px, 1.5vh, 20px) clamp(12px, 1.8vw, 24px);
   width: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  box-sizing: border-box;
 }
 
 .avtar-card {
-  width: min(1200px, 98%);
-  max-width: 1200px;
+  width: 100%;
+  max-width: 1360px;
   margin: 0 auto;
-  padding: clamp(20px, 2.5vw, 28px);
+  padding: clamp(12px, 1.4vw, 20px);
   border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 26px;
+  border-radius: 24px;
   background:
     radial-gradient(circle at 40% 0%, rgba(124, 108, 255, 0.12), transparent 28rem),
     radial-gradient(circle at 85% 100%, rgba(56, 189, 248, 0.08), transparent 26rem),
@@ -812,6 +815,8 @@ textarea:focus-visible {
     inset 0 1px 0 rgba(255, 255, 255, 0.06);
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: 0;
   box-sizing: border-box;
 }
@@ -821,10 +826,11 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 18px;
+  gap: 14px;
+  padding-bottom: 12px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-  margin-bottom: 20px;
+  margin-bottom: 14px;
+  flex-shrink: 0;
 }
 
 .avatar-title-wrap {
@@ -941,11 +947,11 @@ textarea:focus-visible {
 /* Two-column body layout */
 .avatar-body-row {
   display: grid;
-  grid-template-columns: minmax(420px, 1.1fr) minmax(380px, 1fr);
-  gap: 22px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: clamp(14px, 1.5vw, 20px);
   align-items: stretch;
   flex: 1;
-  min-height: 540px;
+  min-height: 0;
 }
 
 /* =========================================================
@@ -956,10 +962,10 @@ textarea:focus-visible {
   position: relative;
   width: 100%;
   height: 100%;
-  min-height: 520px;
-  max-height: 640px;
-  aspect-ratio: 4 / 3;
-  border-radius: 22px;
+  min-height: 260px;
+  max-height: min(65vh, 560px);
+  aspect-ratio: var(--avatar-aspect-ratio, 16 / 9);
+  border-radius: 20px;
   overflow: hidden;
   background: radial-gradient(circle at 50% 30%, #151e32 0%, #070a12 100%);
   border: 1px solid rgba(124, 108, 255, 0.22);
@@ -971,6 +977,7 @@ textarea:focus-visible {
   justify-content: center;
   cursor: default;
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  margin: 0 auto;
 }
 
 .avatar-stage.listening {
@@ -996,7 +1003,7 @@ textarea:focus-visible {
   z-index: 3;
 }
 
-/* Backing crisp avatar image: permanently mounted and visible at z-index 1 */
+/* Backing crisp avatar image: placeholder shown before video connects or when session ends */
 .avatar-stage .avatar-image {
   position: absolute;
   inset: 0;
@@ -1006,9 +1013,18 @@ textarea:focus-visible {
   object-position: center top;
   z-index: 1;
   display: block;
+  transition: opacity 0.25s ease;
 }
 
-/* WebRTC video stream: overlays smoothly with opacity transition; never shows black box */
+.avatar-stage.has-active-video .avatar-image,
+.avatar-stage .avatar-image.hidden {
+  display: none !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* WebRTC video stream: covers full stage container seamlessly without blank bars top or bottom */
 .avatar-stage .avatar-video {
   position: absolute;
   inset: 0;
@@ -1017,7 +1033,7 @@ textarea:focus-visible {
   object-fit: cover;
   object-position: center top;
   z-index: 2;
-  background: transparent;
+  background: #070a12;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.35s ease;
@@ -1329,14 +1345,14 @@ textarea:focus-visible {
 .avatar-live-chat-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-height: 520px;
-  max-height: 640px;
+  gap: 10px;
+  min-height: 260px;
+  max-height: min(65vh, 560px);
   height: 100%;
-  border-radius: 22px;
+  border-radius: 20px;
   background: rgba(13, 19, 33, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.12);
-  padding: 16px 18px;
+  padding: 14px 16px;
   box-sizing: border-box;
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -1826,31 +1842,31 @@ textarea:focus-visible {
    TALK WITH AVATAR RESPONSIVENESS
 ========================================================= */
 
-@media (max-width: 1024px) {
+@media (max-width: 1060px) {
   .avatar-body-row {
     grid-template-columns: 1fr;
-    gap: 18px;
+    gap: 16px;
   }
 
   .avatar-stage {
-    min-height: 420px;
-    max-height: 50vh;
+    min-height: 260px;
+    max-height: 44vh;
   }
 
   .avatar-live-chat-panel {
-    min-height: 420px;
-    max-height: 55vh;
+    min-height: 320px;
+    max-height: 48vh;
   }
 }
 
 @media (max-width: 768px) {
   .avtar-page {
-    padding: 12px;
+    padding: 10px;
   }
 
   .avtar-card {
-    padding: 16px 14px;
-    border-radius: 20px;
+    padding: 14px 12px;
+    border-radius: 18px;
   }
 
   .avatar-header-row {
@@ -1864,14 +1880,16 @@ textarea:focus-visible {
   }
 
   .avatar-stage {
-    min-height: 320px;
-    max-height: 45vh;
-    border-radius: 18px;
+    min-height: 220px;
+    max-height: 38vh;
+    border-radius: 16px;
   }
 
   .avatar-live-chat-panel {
-    border-radius: 18px;
-    padding: 14px;
+    border-radius: 16px;
+    padding: 12px;
+    min-height: 280px;
+    max-height: 52vh;
   }
 
   .help-panel-grid {
@@ -2714,32 +2732,110 @@ textarea:focus-visible {
 .composer-mode {
   display: flex;
   align-items: center;
-
-  gap: 7px;
-
+  gap: 8px;
   margin: 0 0 8px 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  transition: all 0.2s ease;
+}
 
-  color: #68758a;
+.composer-mode.listening {
+  color: #fb7185;
+}
 
-  font-size: 8px;
+.composer-mode.processing {
+  color: #c084fc;
+}
+
+.composer-mode.speaking {
+  color: #a5b4fc;
+}
+
+.composer-mode.ready {
+  color: #94a3b8;
 }
 
 .mode-dot {
-  width: 5px;
-  height: 5px;
-
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-
   background: var(--green);
-
-  box-shadow:
-    0 0 8px
-      rgba(74, 222, 154, 0.45);
+  box-shadow: 0 0 8px rgba(74, 222, 154, 0.45);
+  transition: all 0.2s ease;
 }
 
-.mode-dot.active {
-  animation:
-    pulse-dot 1s infinite;
+.mode-dot.listening-dot {
+  background: #f43f5e;
+  box-shadow: 0 0 10px #f43f5e;
+  animation: liveDotPulse 1.2s infinite;
+}
+
+.mode-dot.processing-dot {
+  background: #a855f7;
+  box-shadow: 0 0 10px #a855f7;
+  animation: liveDotPulse 1.2s infinite;
+}
+
+.mode-dot.speaking-dot {
+  background: #6366f1;
+  box-shadow: 0 0 12px #6366f1;
+}
+
+.mode-dot.ready-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.composer-mode-text.speaking-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-equalizer {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+
+.mini-equalizer .eq-bar {
+  width: 2.5px;
+  background: #818cf8;
+  border-radius: 99px;
+  animation: soundwaveAnim 0.8s ease-in-out infinite alternate;
+}
+
+.mini-equalizer .b1 { height: 6px; animation-delay: 0s; }
+.mini-equalizer .b2 { height: 11px; animation-delay: 0.2s; }
+.mini-equalizer .b3 { height: 8px; animation-delay: 0.4s; }
+
+.stop-speaking-pill-btn {
+  margin-left: auto;
+  background: rgba(244, 63, 94, 0.16);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  color: #fda4af;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s ease;
+}
+
+.stop-speaking-pill-btn:hover {
+  background: rgba(244, 63, 94, 0.3);
+  color: #ffffff;
+}
+
+.voice-button.speaking {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: #6366f1;
+  color: #a5b4fc;
 }
 
 .composer {
@@ -4476,7 +4572,7 @@ textarea:focus-visible {
   border-radius: 18px;
   display: block;
   z-index: 2;
-  background: transparent;
+  background: #070a12;
   transition: opacity 0.3s ease;
 }
 
